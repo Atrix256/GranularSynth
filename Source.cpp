@@ -125,85 +125,101 @@ bool WriteWaveFile(const char *fileName, std::vector<float>& dataFloat, uint16 n
     return true;
 }
 
-bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numChannels, uint32& sampleRate)
+bool ReadFileIntoMemory (const char *fileName, std::vector<unsigned char>& data)
 {
-	//open the file if we can
+    //open the file if we can
     FILE *file = nullptr;
     fopen_s(&file, fileName, "rb");
-	if(!file)
-	{
-		return false;
-	}
+    if (!file)
+    {
+        return false;
+    }
 
-	//read the main chunk ID and make sure it's "RIFF"
-	char buffer[5];
-	buffer[4] = 0;
-	if(fread(buffer,4,1,file) != 1 || strcmp(buffer,"RIFF"))
-	{
-		fclose(file);
-		return false;
-	}
+    // get the file size and resize the vector to hold the data
+    fseek(file, 0, SEEK_END);
+    data.resize(ftell(file));
 
-	//read the main chunk size
+    // read the file into the vector
+    fseek(file, 0, SEEK_SET);
+    fread(&data[0], 1, data.size(), file);
+
+    // return success
+    fclose(file);
+    return true;
+}
+
+bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numChannels, uint32& sampleRate)
+{
+    // read the whole file into memory if we can
+    std::vector<unsigned char> fileData;
+    if (!ReadFileIntoMemory(fileName, fileData))
+        return false;
+    size_t fileIndex = 0;
+
+	//make sure the main chunk ID is "RIFF"
+	if((fileData.size() < fileIndex + 4) || memcmp(&fileData[fileIndex],"RIFF", 4))
+		return false;
+    fileIndex += 4;
+
+	//get the main chunk size
 	uint32 chunkSize;
-	if(fread(&chunkSize,4,1,file) != 1)
-	{
-		fclose(file);
-		return false;
-	}
+    if (fileData.size() < fileIndex + 4)
+        return false;
+    chunkSize = *(uint32*)&fileData[fileIndex];
+    fileIndex += 4;
 
-	//read the format and make sure it's "WAVE"
-	if(fread(buffer,4,1, file) != 1 || strcmp(buffer,"WAVE"))
-	{
-		fclose(file);
-		return false;
-	}
+	//make sure the format is "WAVE"
+    if ((fileData.size() < fileIndex + 4) || memcmp(&fileData[fileIndex], "WAVE", 4))
+        return false;
+    fileIndex += 4;
+
+    // TODO: clean up types used.
 
 	long chunkPosFmt = -1;
 	long chunkPosData = -1;
-
 	while(chunkPosFmt == -1 || chunkPosData == -1)
 	{
-		//read a sub chunk id and a chunk size if we can
-		if(fread(buffer,4,1, file) != 1 || fread(&chunkSize,4,1, file) != 1)
-		{
-			fclose(file);
-			return false;
-		}
+        // get a chunk id and chunk size if we can
+        if (fileData.size() < fileIndex + 8)
+            return false;
+
+        // get the chunk id if we can
+        const unsigned char* chunkID = (unsigned char*)&fileData[fileIndex];
+        fileIndex += 4;
+        chunkSize = *(uint32*)&fileData[fileIndex];
+        fileIndex += 4;
 
 		//if we hit a fmt
-		if(!strcmp(buffer,"fmt "))
+		if(!memcmp(chunkID,"fmt ", 4))
 		{
-			chunkPosFmt = ftell(file) - 8;
+			chunkPosFmt = (long)(fileIndex - 8);
 		}
 		//else if we hit a data
-		else if(!strcmp(buffer,"data"))
+		else if(!memcmp(chunkID,"data", 4))
 		{
-			chunkPosData = ftell(file) - 8;
+			chunkPosData = (long)(fileIndex - 8);
 		}
 
 		//skip to the next chunk
-		fseek(file,chunkSize,SEEK_CUR);
+        fileIndex += chunkSize;
 	}
 
 	//we'll use this handy struct to load in 
 	SMinimalWaveFileHeader waveData;
 
 	//load the fmt part if we can
-	fseek(file,chunkPosFmt,SEEK_SET);
-	if(fread(&waveData.m_subChunk1ID,24,1, file) != 1)
-	{
-		fclose(file);
-		return false;
-	}
+    fileIndex = chunkPosFmt;
+    if (fileData.size() < fileIndex + 24)
+        return false;
+    memcpy(&waveData.m_subChunk1ID, &fileData[fileIndex], 24);
+    fileIndex += 24;
 
 	//load the data part if we can
-	fseek(file,chunkPosData,SEEK_SET);
-	if(fread(&waveData.m_subChunk2ID,8,1, file) != 1)
-	{
-		fclose(file);
-		return false;
-	}
+    fileIndex = chunkPosData;
+    if (fileData.size() < fileIndex + 8)
+        return false;
+    memcpy(&waveData.m_subChunk2ID, &fileData[fileIndex], 8);
+    fileIndex += 8;
 
 	//verify a couple things about the file data
 	if(waveData.m_audioFormat != 1 ||       //only pcm data
@@ -213,7 +229,6 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	   waveData.m_bitsPerSample % 8 != 0 || //must be a multiple of 8 bites
 	   waveData.m_blockAlign > 8)           //blocks must be 8 bytes or lower
 	{
-		fclose(file);
 		return false;
 	}
 
@@ -233,37 +248,28 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	int bytesPerSample = bytesPerBlock / waveData.m_numChannels;
 	for(int nIndex = 0; nIndex < numSourceSamples; nIndex += waveData.m_numChannels)
 	{
-		//read in a block
-		if(fread(blockData,waveData.m_blockAlign,1, file) != 1)
-		{
-			fclose(file);
-			return false;
-		}
-
+        //read in a block
+        if (fileData.size() < fileIndex + waveData.m_blockAlign)
+            return false;
+        memcpy(blockData, &fileData[fileIndex], waveData.m_blockAlign);
+        fileIndex += waveData.m_blockAlign;
+		
 		//get the first sample
         PCMToFloat(data[nIndex], blockData, bytesPerSample);
-
-        if (data[nIndex] < -1.0f || data[nIndex] > 1.0f)
-        {
-            int ijkl = 0;
-        }
 
 		//get the second sample if there is one
 		if(waveData.m_numChannels == 2)
 		{
             PCMToFloat(data[nIndex + 1] , &blockData[bytesPerSample], bytesPerSample);
-
-            if (data[nIndex] < -1.0f || data[nIndex] > 1.0f)
-            {
-                int ijkl = 0;
-            }
 		}
 	}
+
+    // TODO: maybe we need to just zip through the above instead of checking # of channels etc
+    // TODO: i feel like we don't need to memcpy into block data, but just advance the index, and pass that through raw
 
 	//return our data
     numChannels = waveData.m_numChannels;
     sampleRate = waveData.m_sampleRate;
-    fclose(file);
 	return true;
 }
  
