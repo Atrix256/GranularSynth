@@ -3,14 +3,9 @@
 #include <inttypes.h>
 #include <vector>
  
-// constants
-const float c_pi = 3.14159265359f;
-const float c_twoPi = 2.0f * c_pi;
- 
 // typedefs
 typedef uint16_t    uint16;
 typedef uint32_t    uint32;
-typedef int16_t     int16;
 typedef int32_t     int32;
  
 //this struct is the minimal required header data for a wav file
@@ -37,13 +32,60 @@ struct SMinimalWaveFileHeader
  
     //then comes the data!
 };
- 
-//this writes
-template <typename T>
-bool WriteWaveFile(const char *fileName, std::vector<T> data, int16 numChannels, int32 sampleRate)
+
+
+inline void FloatToPCM(unsigned char *PCM, const float& in, size_t numBytes)
 {
-    int32 dataSize = data.size() * sizeof(T);
-    int32 bitsPerSample = sizeof(T) * 8;
+    // if a negative number
+    uint32 data;
+    if (in < 0.0f)
+        data = uint32(in * float(0x80000000));
+    else
+        data = uint32(in * float(0x7fffffff));
+
+    // TODO: make numBytes a template param when doing it in a block
+    switch (numBytes)
+    {
+        case 4: PCM[3] = ((data >> 24) & 0xFF); PCM[2] = ((data >> 16) & 0xFF); PCM[1] = ((data >> 8) & 0xFF); PCM[0] = (data & 0xFF); break;
+        case 3: PCM[2] = ((data >> 24) & 0xFF); PCM[1] = ((data >> 16) & 0xFF); PCM[0] = ((data >> 8) & 0xFF); break;
+        case 2: PCM[1] = ((data >> 24) & 0xFF); PCM[0] = ((data >> 16) & 0xFF); break; 
+        case 1: PCM[0] = ((data >> 24) & 0xFF); break;
+    }
+}
+
+inline void PCMToFloat(float& out, const unsigned char *PCM, size_t numBytes)
+{
+    // TODO: make numBytes a template param when doing it in a block
+    uint32 data = 0;
+    switch (numBytes)
+    {
+        case 4: data = (uint32(PCM[3]) << 24) | (uint32(PCM[2]) << 16) | (uint32(PCM[1]) << 8) | uint32(PCM[0]); break;
+        case 3: data = (uint32(PCM[2]) << 24) | (uint32(PCM[1]) << 16) | (uint32(PCM[0]) << 8); break;
+        case 2: data = (uint32(PCM[1]) << 24) | (uint32(PCM[0]) << 16); break;
+        case 1: data = (uint32(PCM[0]) << 24); break;
+    }
+
+    // if a negative number
+    if (data & 0x80000000)
+        out = float(int32(data)) / float(0x80000000);
+    else
+        out = float(data) / float(0x7fffffff);
+}
+
+void FloatToPCM (const std::vector<float>& in, std::vector<int32>& out)
+{
+    out.resize(in.size());
+    for (size_t i = 0; i < in.size(); ++i)
+        FloatToPCM((unsigned char*)&out[i], in[i], 4);        
+}
+ 
+bool WriteWaveFile(const char *fileName, std::vector<float>& dataFloat, uint16 numChannels, uint32 sampleRate)
+{
+    std::vector<int32> data;
+    FloatToPCM(dataFloat, data);
+
+    uint32 dataSize = (uint32)(data.size() * sizeof(int32));
+    uint16 bitsPerSample = sizeof(int32) * 8;
  
     //open the file if we can
     FILE *File = nullptr;
@@ -82,92 +124,172 @@ bool WriteWaveFile(const char *fileName, std::vector<T> data, int16 numChannels,
     fclose(File);
     return true;
 }
- 
-template <typename T>
-void ConvertFloatSamples (const std::vector<float>& in, std::vector<T>& out)
+
+bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numChannels, uint32& sampleRate)
 {
-    // make our out samples the right size
-    out.resize(in.size());
- 
-    // convert in format to out format !
-    for (size_t i = 0, c = in.size(); i < c; ++i)
-    {
-        float v = in[i];
-        if (v < 0.0f)
-            v *= -float(std::numeric_limits<T>::lowest());
-        else
-            v *= float(std::numeric_limits<T>::max());
-        out[i] = T(v);
-    }
-}
- 
-void GenerateMonoBeatingSamples (std::vector<float>& samples, int sampleRate)
-{
-    int sectionLength = samples.size() / 3;
-    int envelopeLen = sampleRate / 20;
- 
-    for (int index = 0, numSamples = samples.size(); index < numSamples; ++index)
-    {
-        samples[index] = 0.0f;
-        int section = index / sectionLength;
-        int sectionOffset = index % sectionLength;
- 
-        // apply an envelope at front and back  of each section keep it from popping between sounds
-        float envelope = 1.0f;
-        if (sectionOffset < envelopeLen)
-            envelope = float(sectionOffset) / float(envelopeLen);
-        else if (sectionOffset > sectionLength - envelopeLen)
-            envelope = (float(sectionLength) - float(sectionOffset)) / float(envelopeLen);
- 
-        // first sound
-        if (section == 0 || section == 2)
-            samples[index] += sin(float(index) * c_twoPi * 200.0f / float(sampleRate)) * envelope;
- 
-        // second sound
-        if (section == 1 || section == 2)
-            samples[index] += sin(float(index) * c_twoPi * 205.0f / float(sampleRate)) * envelope;
- 
-        // scale it to prevent clipping
-        if (section == 2)
-            samples[index] *= 0.5f;
-        samples[index] *= 0.95f;
-    }
-}
- 
-void GenerateStereoBeatingSamples (std::vector<float>& samples, int sampleRate)
-{
-    int sectionLength = (samples.size() / 2) / 3;
-    int envelopeLen = sampleRate / 20;
- 
-    for (int index = 0, numSamples = samples.size() / 2; index < numSamples; ++index)
-    {
-        samples[index * 2] = 0.0f;
-        samples[index * 2 + 1] = 0.0f;
- 
-        int section = index / sectionLength;
-        int sectionOffset = index % sectionLength;
- 
-        // apply an envelope at front and back  of each section keep it from popping between sounds
-        float envelope = 1.0f;
-        if (sectionOffset < envelopeLen)
-            envelope = float(sectionOffset) / float(envelopeLen);
-        else if (sectionOffset > sectionLength - envelopeLen)
-            envelope = (float(sectionLength) - float(sectionOffset)) / float(envelopeLen);
-        envelope *= 0.95f;
- 
-        // first sound
-        if (section == 0 || section == 2)
-            samples[index * 2] += sin(float(index) * c_twoPi * 200.0f / float(sampleRate)) * envelope;
- 
-        // second sound
-        if (section == 1 || section == 2)
-            samples[index * 2 + 1] += sin(float(index) * c_twoPi * 205.0f / float(sampleRate)) * envelope;
-    }
+	//open the file if we can
+    FILE *file = nullptr;
+    fopen_s(&file, fileName, "rb");
+	if(!file)
+	{
+		return false;
+	}
+
+	//read the main chunk ID and make sure it's "RIFF"
+	char buffer[5];
+	buffer[4] = 0;
+	if(fread(buffer,4,1,file) != 1 || strcmp(buffer,"RIFF"))
+	{
+		fclose(file);
+		return false;
+	}
+
+	//read the main chunk size
+	uint32 chunkSize;
+	if(fread(&chunkSize,4,1,file) != 1)
+	{
+		fclose(file);
+		return false;
+	}
+
+	//read the format and make sure it's "WAVE"
+	if(fread(buffer,4,1, file) != 1 || strcmp(buffer,"WAVE"))
+	{
+		fclose(file);
+		return false;
+	}
+
+	long chunkPosFmt = -1;
+	long chunkPosData = -1;
+
+	while(chunkPosFmt == -1 || chunkPosData == -1)
+	{
+		//read a sub chunk id and a chunk size if we can
+		if(fread(buffer,4,1, file) != 1 || fread(&chunkSize,4,1, file) != 1)
+		{
+			fclose(file);
+			return false;
+		}
+
+		//if we hit a fmt
+		if(!strcmp(buffer,"fmt "))
+		{
+			chunkPosFmt = ftell(file) - 8;
+		}
+		//else if we hit a data
+		else if(!strcmp(buffer,"data"))
+		{
+			chunkPosData = ftell(file) - 8;
+		}
+
+		//skip to the next chunk
+		fseek(file,chunkSize,SEEK_CUR);
+	}
+
+	//we'll use this handy struct to load in 
+	SMinimalWaveFileHeader waveData;
+
+	//load the fmt part if we can
+	fseek(file,chunkPosFmt,SEEK_SET);
+	if(fread(&waveData.m_subChunk1ID,24,1, file) != 1)
+	{
+		fclose(file);
+		return false;
+	}
+
+	//load the data part if we can
+	fseek(file,chunkPosData,SEEK_SET);
+	if(fread(&waveData.m_subChunk2ID,8,1, file) != 1)
+	{
+		fclose(file);
+		return false;
+	}
+
+	//verify a couple things about the file data
+	if(waveData.m_audioFormat != 1 ||       //only pcm data
+	   waveData.m_numChannels < 1 ||        //must have a channel
+	   waveData.m_numChannels > 2 ||        //must not have more than 2
+	   waveData.m_bitsPerSample > 32 ||     //32 bits per sample max
+	   waveData.m_bitsPerSample % 8 != 0 || //must be a multiple of 8 bites
+	   waveData.m_blockAlign > 8)           //blocks must be 8 bytes or lower
+	{
+		fclose(file);
+		return false;
+	}
+
+	//figure out how many samples and blocks there are total in the source data
+	int bytesPerBlock = waveData.m_blockAlign;
+	int numBlocks = waveData.m_subChunk2Size / bytesPerBlock;
+	int numSourceSamples = numBlocks * waveData.m_numChannels;
+
+	//allocate space for the source samples
+    data.resize(numSourceSamples);
+
+	//maximum size of a block is 8 bytes.  4 bytes per samples, 2 channels
+	unsigned char blockData[8];
+	memset(blockData,0,8);
+
+	//read in the source samples at whatever sample rate / number of channels it might be in
+	int bytesPerSample = bytesPerBlock / waveData.m_numChannels;
+	for(int nIndex = 0; nIndex < numSourceSamples; nIndex += waveData.m_numChannels)
+	{
+		//read in a block
+		if(fread(blockData,waveData.m_blockAlign,1, file) != 1)
+		{
+			fclose(file);
+			return false;
+		}
+
+		//get the first sample
+        PCMToFloat(data[nIndex], blockData, bytesPerSample);
+
+        if (data[nIndex] < -1.0f || data[nIndex] > 1.0f)
+        {
+            int ijkl = 0;
+        }
+
+		//get the second sample if there is one
+		if(waveData.m_numChannels == 2)
+		{
+            PCMToFloat(data[nIndex + 1] , &blockData[bytesPerSample], bytesPerSample);
+
+            if (data[nIndex] < -1.0f || data[nIndex] > 1.0f)
+            {
+                int ijkl = 0;
+            }
+		}
+	}
+
+	//return our data
+    numChannels = waveData.m_numChannels;
+    sampleRate = waveData.m_sampleRate;
+    fclose(file);
+	return true;
 }
  
 //the entry point of our application
 int main(int argc, char **argv)
 {
+    uint16 numChannels;
+    uint32 sampleRate;
+    std::vector<float> legend1;
+    ReadWaveFile("legend1.wav", legend1, numChannels, sampleRate);
+
+    float maxAbsVal = 0.0f;
+    float maxValue = 0.0f;
+    for (float f : legend1)
+    {
+        if (std::fabsf(f) > maxAbsVal)
+        {
+            maxAbsVal = std::fabsf(f);
+            maxValue = f;
+        }
+    }
+
+
+    WriteWaveFile("out.wav", legend1, numChannels, sampleRate);
+
+    /*
     // generate the mono beating effect
     {
         // sound format parameters
@@ -213,14 +335,23 @@ int main(int argc, char **argv)
         // write our samples to a wave file
         WriteWaveFile("stereobeat.wav", samplesInt, c_numChannels, c_sampleRate);
     }
+    */
 }
 
 /*
 
 TODO:
 
+* this stuff needs cleaning up big time :P
+
+* fread the entire file in at once?
+
+* test 1, 2, 3, 4, byte formats. test their round trips too!
+
 * actually, maybe start with source code for "lament of tim curry"
  * https://blog.demofox.org/2012/06/18/diy-synth-3-sampling-mixing-and-band-limited-wave-forms/
+
+ * build w32 and x64
 
 * use granular synthesis to stretch and squish a sound without affecting frequency
 * also, adjust frequency without affecting length
