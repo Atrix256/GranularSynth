@@ -72,17 +72,13 @@ inline void PCMToFloat(float& out, const unsigned char *PCM, size_t numBytes)
         out = float(data) / float(0x7fffffff);
 }
 
-void FloatToPCM (const std::vector<float>& in, std::vector<int32>& out)
-{
-    out.resize(in.size());
-    for (size_t i = 0; i < in.size(); ++i)
-        FloatToPCM((unsigned char*)&out[i], in[i], 4);        
-}
- 
+// TODO: make this function take bytes per sample, 1, 2, 3, or 4!
 bool WriteWaveFile(const char *fileName, std::vector<float>& dataFloat, uint16 numChannels, uint32 sampleRate)
 {
     std::vector<int32> data;
-    FloatToPCM(dataFloat, data);
+    data.resize(dataFloat.size());
+    for (size_t i = 0; i < dataFloat.size(); ++i)
+        FloatToPCM((unsigned char*)&data[i], dataFloat[i], 4);
 
     uint32 dataSize = (uint32)(data.size() * sizeof(int32));
     uint16 bitsPerSample = sizeof(int32) * 8;
@@ -233,44 +229,55 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	}
 
 	//figure out how many samples and blocks there are total in the source data
-	int bytesPerBlock = waveData.m_blockAlign;
-	int numBlocks = waveData.m_subChunk2Size / bytesPerBlock;
-	int numSourceSamples = numBlocks * waveData.m_numChannels;
+    int bytesPerSample = waveData.m_blockAlign / waveData.m_numChannels;
+    size_t numSourceSamples = waveData.m_subChunk2Size / bytesPerSample;
 
 	//allocate space for the source samples
     data.resize(numSourceSamples);
 
-	//maximum size of a block is 8 bytes.  4 bytes per samples, 2 channels
-	unsigned char blockData[8];
-	memset(blockData,0,8);
-
 	//read in the source samples at whatever sample rate / number of channels it might be in
-	int bytesPerSample = bytesPerBlock / waveData.m_numChannels;
-	for(int nIndex = 0; nIndex < numSourceSamples; nIndex += waveData.m_numChannels)
-	{
-        //read in a block
-        if (fileData.size() < fileIndex + waveData.m_blockAlign)
-            return false;
-        memcpy(blockData, &fileData[fileIndex], waveData.m_blockAlign);
-        fileIndex += waveData.m_blockAlign;
-		
-		//get the first sample
-        PCMToFloat(data[nIndex], blockData, bytesPerSample);
+    if (fileData.size() < fileIndex + numSourceSamples * bytesPerSample)
+        return false;
 
-		//get the second sample if there is one
-		if(waveData.m_numChannels == 2)
-		{
-            PCMToFloat(data[nIndex + 1] , &blockData[bytesPerSample], bytesPerSample);
-		}
+	for(int nIndex = 0; nIndex < numSourceSamples; ++nIndex)
+	{	
+        PCMToFloat(data[nIndex], &fileData[fileIndex], bytesPerSample);
+        fileIndex += bytesPerSample;
 	}
-
-    // TODO: maybe we need to just zip through the above instead of checking # of channels etc
-    // TODO: i feel like we don't need to memcpy into block data, but just advance the index, and pass that through raw
 
 	//return our data
     numChannels = waveData.m_numChannels;
     sampleRate = waveData.m_sampleRate;
 	return true;
+}
+
+void ChangePlaybackSpeed (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, float speedMultiplier)
+{
+    // linear interpolate samples. Cubic hermite would give better results, but this isn't the main point of the program
+
+    size_t numSrcSamples = input.size() / numChannels;
+    size_t numOutSamples = (size_t)(float(numSrcSamples) / speedMultiplier);
+    output.resize(numOutSamples * numChannels);
+
+    for (size_t outSample = 0; outSample < numOutSamples; ++outSample)
+    {
+        float percent = float(outSample) / float(numOutSamples-1);
+
+        float srcSampleFloat = float(numSrcSamples) * percent;
+        
+        size_t srcSample = size_t(srcSampleFloat);
+        float srcSampleFraction = srcSampleFloat - std::floorf(srcSampleFloat);
+
+        for (uint16 channel = 0; channel < numChannels; ++channel)
+        {
+            float value1 = srcSample * numChannels + channel < input.size() ? input[srcSample * numChannels + channel] : *input.rbegin();
+            float value2 = (srcSample + 1) * numChannels + channel < input.size() ? input[(srcSample + 1) * numChannels + channel] : *input.rbegin();
+
+            float outValue = value1 * (1.0f - srcSampleFraction) + value2 * srcSampleFraction;
+
+            output[outSample*numChannels + channel] = outValue;
+        }
+    }
 }
  
 //the entry point of our application
@@ -278,70 +285,26 @@ int main(int argc, char **argv)
 {
     uint16 numChannels;
     uint32 sampleRate;
-    std::vector<float> legend1;
-    ReadWaveFile("legend1.wav", legend1, numChannels, sampleRate);
+    std::vector<float> source;
+    ReadWaveFile("legend1.wav", source, numChannels, sampleRate);
 
-    float maxAbsVal = 0.0f;
-    float maxValue = 0.0f;
-    for (float f : legend1)
+
+    // speed up the audio and increase pitch
     {
-        if (std::fabsf(f) > maxAbsVal)
-        {
-            maxAbsVal = std::fabsf(f);
-            maxValue = f;
-        }
+        std::vector<float> out;
+        ChangePlaybackSpeed(source, out, numChannels, 1.3f);
+        WriteWaveFile("out_Fast.wav", out, numChannels, sampleRate);
+    }
+
+    // slow down the audio and decrease pitch
+    {
+        std::vector<float> out;
+        ChangePlaybackSpeed(source, out, numChannels, 0.7f);
+        WriteWaveFile("out_Slow.wav", out, numChannels, sampleRate);
     }
 
 
-    WriteWaveFile("out.wav", legend1, numChannels, sampleRate);
-
-    /*
-    // generate the mono beating effect
-    {
-        // sound format parameters
-        const int c_sampleRate = 44100;
-        const int c_numSeconds = 4;
-        const int c_numChannels = 1;
-        const int c_numSamples = c_sampleRate * c_numChannels * c_numSeconds;
- 
-        // make space for our samples
-        std::vector<float> samples;
-        samples.resize(c_numSamples);
- 
-        // generate samples
-        GenerateMonoBeatingSamples(samples, c_sampleRate);
- 
-        // convert from float to the final format
-        std::vector<int32> samplesInt;
-        ConvertFloatSamples(samples, samplesInt);
- 
-        // write our samples to a wave file
-        WriteWaveFile("monobeat.wav", samplesInt, c_numChannels, c_sampleRate);
-    }
- 
-    // generate the stereo beating effect (binaural beat)
-    {
-        // sound format parameters
-        const int c_sampleRate = 44100;
-        const int c_numSeconds = 4;
-        const int c_numChannels = 2;
-        const int c_numSamples = c_sampleRate * c_numChannels * c_numSeconds;
- 
-        // make space for our samples
-        std::vector<float> samples;
-        samples.resize(c_numSamples);
- 
-        // generate samples
-        GenerateStereoBeatingSamples(samples, c_sampleRate);
- 
-        // convert from float to the final format
-        std::vector<int32> samplesInt;
-        ConvertFloatSamples(samples, samplesInt);
- 
-        // write our samples to a wave file
-        WriteWaveFile("stereobeat.wav", samplesInt, c_numChannels, c_sampleRate);
-    }
-    */
+    WriteWaveFile("out.wav", source, numChannels, sampleRate);
 }
 
 /*
