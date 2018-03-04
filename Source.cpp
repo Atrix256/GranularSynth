@@ -36,14 +36,12 @@ struct SMinimalWaveFileHeader
 
 inline void FloatToPCM(unsigned char *PCM, const float& in, size_t numBytes)
 {
-    // if a negative number
     uint32 data;
     if (in < 0.0f)
         data = uint32(in * float(0x80000000));
     else
         data = uint32(in * float(0x7fffffff));
 
-    // TODO: make numBytes a template param when doing it in a block
     switch (numBytes)
     {
         case 4: PCM[3] = ((data >> 24) & 0xFF); PCM[2] = ((data >> 16) & 0xFF); PCM[1] = ((data >> 8) & 0xFF); PCM[0] = (data & 0xFF); break;
@@ -55,7 +53,6 @@ inline void FloatToPCM(unsigned char *PCM, const float& in, size_t numBytes)
 
 inline void PCMToFloat(float& out, const unsigned char *PCM, size_t numBytes)
 {
-    // TODO: make numBytes a template param when doing it in a block
     uint32 data = 0;
     switch (numBytes)
     {
@@ -65,7 +62,6 @@ inline void PCMToFloat(float& out, const unsigned char *PCM, size_t numBytes)
         case 1: data = (uint32(PCM[0]) << 24); break;
     }
 
-    // if a negative number
     if (data & 0x80000000)
         out = float(int32(data)) / float(0x80000000);
     else
@@ -253,8 +249,6 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 
 void ChangePlaybackSpeed (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, float speedMultiplier)
 {
-    // linear interpolate samples. Cubic hermite would give better results, but this isn't the main point of the program
-
     size_t numSrcSamples = input.size() / numChannels;
     size_t numOutSamples = (size_t)(float(numSrcSamples) / speedMultiplier);
     output.resize(numOutSamples * numChannels);
@@ -270,12 +264,71 @@ void ChangePlaybackSpeed (const std::vector<float>& input, std::vector<float>& o
 
         for (uint16 channel = 0; channel < numChannels; ++channel)
         {
+            // linear interpolate samples. Cubic hermite would give better results, but this isn't the main point of the program and linear works well enough.
             float value1 = srcSample * numChannels + channel < input.size() ? input[srcSample * numChannels + channel] : *input.rbegin();
             float value2 = (srcSample + 1) * numChannels + channel < input.size() ? input[(srcSample + 1) * numChannels + channel] : *input.rbegin();
+            output[outSample*numChannels + channel] = value1 * (1.0f - srcSampleFraction) + value2 * srcSampleFraction;
+        }
+    }
+}
 
-            float outValue = value1 * (1.0f - srcSampleFraction) + value2 * srcSampleFraction;
+// SmoothStep
+// a function that interpolates between 0 and 1 in a way such that it's smoother than lerp, and has flat derivatives at 0 and 1.
+// https://en.wikipedia.org/wiki/Smoothstep
+float SmoothStep(float x)
+{
+    if (x <= 0.0f)
+        return 0.0f;
+    else if (x >= 1.0f)
+        return 1.0f;
+    else
+        return 3.0f * x * x - 2.0f * x * x * x;
+}
 
-            output[outSample*numChannels + channel] = outValue;
+// Generates a simple trapezoid type envelope (Attack, Sustain, Decay)
+// Then applies smoothstep to make it more smooth
+float EnvelopeGenerator (float percent, float attackDecay)
+{
+    if (percent < attackDecay)
+        return SmoothStep(percent / attackDecay);
+    else if ((1.0f - percent) < attackDecay)
+        return SmoothStep((1.0f - percent) / attackDecay);
+    else
+        return 1.0f;
+}
+
+void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float timeMultiplier, float grainSizeSeconds, float envelopeSizePercent)
+{
+    size_t numSrcSamples = input.size() / numChannels;
+    size_t numOutSamples = (size_t)(float(numSrcSamples) / timeMultiplier);
+    output.resize(numOutSamples * numChannels, 0.0f);
+
+    size_t grainSizeSamples = size_t(float(sampleRate)*grainSizeSeconds);
+
+    size_t numGrains = numSrcSamples / grainSizeSamples;
+    if (numSrcSamples % grainSizeSamples)
+        numGrains++;
+
+    size_t outSampleIndex = 0;
+    for (size_t grain = 0; grain < numGrains; ++grain)
+    {
+        size_t grainStart = grain * grainSizeSamples;
+        size_t grainEnd = (grain + 1)*grainSizeSamples;
+
+        size_t outGrainEnd = size_t(float(grainEnd) / timeMultiplier);
+
+        while (outSampleIndex < outGrainEnd && outSampleIndex < numOutSamples)
+        {
+            for (size_t sample = 0; sample < grainSizeSamples && outSampleIndex + sample < numOutSamples; ++sample)
+            {
+                float envelope = EnvelopeGenerator(float(sample) / float(grainSizeSamples - 1), envelopeSizePercent);
+                for (size_t channel = 0; channel < numChannels; ++channel)
+                {
+                    output[(outSampleIndex + sample)*numChannels + channel] = input[(grainStart + sample)*numChannels + channel] * envelope;
+                }
+            }
+
+            outSampleIndex += grainSizeSamples;
         }
     }
 }
@@ -285,24 +338,36 @@ int main(int argc, char **argv)
 {
     uint16 numChannels;
     uint32 sampleRate;
-    std::vector<float> source;
+    std::vector<float> source, out;
     ReadWaveFile("legend1.wav", source, numChannels, sampleRate);
 
-
+#if 1
     // speed up the audio and increase pitch
-    {
-        std::vector<float> out;
-        ChangePlaybackSpeed(source, out, numChannels, 1.3f);
-        WriteWaveFile("out_Fast.wav", out, numChannels, sampleRate);
-    }
+    ChangePlaybackSpeed(source, out, numChannels, 1.3f);
+    WriteWaveFile("out_A_Fast.wav", out, numChannels, sampleRate);
 
     // slow down the audio and decrease pitch
-    {
-        std::vector<float> out;
-        ChangePlaybackSpeed(source, out, numChannels, 0.7f);
-        WriteWaveFile("out_Slow.wav", out, numChannels, sampleRate);
-    }
+    ChangePlaybackSpeed(source, out, numChannels, 0.7f);
+    WriteWaveFile("out_A_Slow.wav", out, numChannels, sampleRate);
+#endif
 
+    // speed up audio without affecting pitch
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.02f, 0.1f );
+    WriteWaveFile("out_B_Short.wav", out, numChannels, sampleRate);
+
+    // slow down audio without affecting pitch
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 0.01f, 0.2f );
+    WriteWaveFile("out_B_Long.wav", out, numChannels, sampleRate);
+
+    // TODO: why do we divide by the multipliers, in both GranularTimeAdjust() and ChangePlaybackSpeed()?
+
+    // TODO: when making it shorter, do we skip granules?
+
+    // TODO: change pitch without affecting length
+
+    // TODO: autotune it to twinkle twinkle, and/or put it on a sine wave!
+    
+    // TODO: I think there may be some math issues with GranularTimeAdjust() and index calculations. I got a crash when switching to divide or passing reciprocal
 
     WriteWaveFile("out.wav", source, numChannels, sampleRate);
 }
@@ -328,8 +393,21 @@ TODO:
 
 * compare using zero crossings, cubic interpolation, and envelopes
 
+* experiment with grain size
+
+* make parames be apples to apples. Like... 0.7 for time adjust is 1.3 for playback speed adjust?? make it take the same values
+
 BLOG:
 
 * Explain algorithm, give results, link to code and also include it!
+
+https://granularsynthesis.com/guide.php
+
+Read these:
+https://www.soundonsound.com/techniques/granular-synthesis
+https://www.granularsynthesis.com/hthesis/grain.html
+
+* note the thing about how on graphics cards there are two -1 values, to make conversion between types easier. same issues as pcm <-> float here!
+ * http://www.yosoygames.com.ar/wp/2018/03/vertex-formats-part-1-compression/
 
 */
