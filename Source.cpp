@@ -247,10 +247,10 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	return true;
 }
 
-void ChangePlaybackSpeed (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, float speedMultiplier)
+void TimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, float timeMultiplier)
 {
     size_t numSrcSamples = input.size() / numChannels;
-    size_t numOutSamples = (size_t)(float(numSrcSamples) / speedMultiplier);
+    size_t numOutSamples = (size_t)(float(numSrcSamples) * timeMultiplier);
     output.resize(numOutSamples * numChannels);
 
     for (size_t outSample = 0; outSample < numOutSamples; ++outSample)
@@ -300,7 +300,7 @@ float EnvelopeGenerator (float percent, float attackDecay)
 void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float timeMultiplier, float grainSizeSeconds, float envelopeSizePercent)
 {
     size_t numSrcSamples = input.size() / numChannels;
-    size_t numOutSamples = (size_t)(float(numSrcSamples) / timeMultiplier);
+    size_t numOutSamples = (size_t)(float(numSrcSamples) * timeMultiplier);
     output.resize(numOutSamples * numChannels, 0.0f);
 
     size_t grainSizeSamples = size_t(float(sampleRate)*grainSizeSeconds);
@@ -315,7 +315,7 @@ void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& ou
         size_t grainStart = grain * grainSizeSamples;
         size_t grainEnd = (grain + 1)*grainSizeSamples;
 
-        size_t outGrainEnd = size_t(float(grainEnd) / timeMultiplier);
+        size_t outGrainEnd = size_t(float(grainEnd) * timeMultiplier);
 
         while (outSampleIndex < outGrainEnd && outSampleIndex < numOutSamples)
         {
@@ -343,23 +343,21 @@ int main(int argc, char **argv)
 
 #if 1
     // speed up the audio and increase pitch
-    ChangePlaybackSpeed(source, out, numChannels, 1.3f);
-    WriteWaveFile("out_A_Fast.wav", out, numChannels, sampleRate);
+    TimeAdjust(source, out, numChannels, 0.7f);
+    WriteWaveFile("out_A_FastHigh.wav", out, numChannels, sampleRate);
 
     // slow down the audio and decrease pitch
-    ChangePlaybackSpeed(source, out, numChannels, 0.7f);
-    WriteWaveFile("out_A_Slow.wav", out, numChannels, sampleRate);
+    TimeAdjust(source, out, numChannels, 1.3f);
+    WriteWaveFile("out_A_SlowLow.wav", out, numChannels, sampleRate);
 #endif
 
     // speed up audio without affecting pitch
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.02f, 0.1f );
-    WriteWaveFile("out_B_Short.wav", out, numChannels, sampleRate);
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 0.02f, 0.1f );
+    WriteWaveFile("out_B_Fast.wav", out, numChannels, sampleRate);
 
     // slow down audio without affecting pitch
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 0.01f, 0.2f );
-    WriteWaveFile("out_B_Long.wav", out, numChannels, sampleRate);
-
-    // TODO: why do we divide by the multipliers, in both GranularTimeAdjust() and ChangePlaybackSpeed()?
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.01f, 0.2f );
+    WriteWaveFile("out_B_Slow.wav", out, numChannels, sampleRate);
 
     // TODO: when making it shorter, do we skip granules?
 
