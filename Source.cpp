@@ -364,8 +364,9 @@ void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& ou
                 continue;
             }
 
-            // else we need to fade out the old grain and then fade in the new one
-            SplatGrainToOutput(input, output, numChannels, lastGrainWritten * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples);
+            // else we need to fade out the old grain and then fade in the new one.
+            // NOTE: fading out the old grain means starting to play the grain after the last one and bringing it's volume down to zero.
+            SplatGrainToOutput(input, output, numChannels, (lastGrainWritten + 1) * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples);
             outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::In, crossFadeSizeSamples);
             lastGrainWritten = grain;
         }
@@ -378,16 +379,20 @@ int main(int argc, char **argv)
     // load the wave file
     uint16 numChannels;
     uint32 sampleRate;
-    std::vector<float> source, out, sourceMono;
-    ReadWaveFile("legend2.wav", source, numChannels, sampleRate);
+    std::vector<float> source, out, out2, sourceLeft, sourceRight;
+    ReadWaveFile("legend1.wav", source, numChannels, sampleRate);
 
-    // make a mono version
-    sourceMono.resize(source.size() / numChannels);
-    for (size_t i = 0; i < sourceMono.size(); ++i)
-        sourceMono[i] = source[i*numChannels];
+    // split the stereo into two mono channels
+    sourceLeft.resize(source.size() / numChannels);
+    sourceRight.resize(sourceLeft.size());
+    for (size_t i = 0; i < sourceLeft.size(); ++i)
+    {
+        sourceLeft[i] = source[i*numChannels];
+        sourceRight[i] = source[i*numChannels+1];
+    }
 
     // TODO: enable before final checkin
-#if 0
+#if 1
     // speed up the audio and increase pitch
     TimeAdjust(source, out, numChannels, 0.7f);
     WriteWaveFile("out_A_FastHigh.wav", out, numChannels, sampleRate);
@@ -411,33 +416,31 @@ int main(int argc, char **argv)
     WriteWaveFile("out_B_Slower.wav", out, numChannels, sampleRate);
 #endif
 
-    // TODO: change pitch without affecting length
+    // TODO: change pitch without affecting length. To do this, do a granular time adjust, then a regular time adjust!
+    // TODO: get cubic hermite instead of linear interpolation, to help the granular results quality
+    // TODO: maybe make a wrapper function that makes these calls??
+    GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.4f, 0.02f, 0.002f);
+    TimeAdjust(out2, out, numChannels, 1.0f / 1.4f);
+    WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
+
+    GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 1.4f, 0.02f, 0.002f);
+    TimeAdjust(out2, out, numChannels, 1.4f);
+    WriteWaveFile("out_D.wav", out, numChannels, sampleRate);
+
 
     // TODO: autotune it to twinkle twinkle, and/or put it on a sine wave!
 
     //WriteWaveFile("out.wav", source, numChannels, sampleRate);
 
-
-    // TODO: this has lots of clicking, but seems like it shouldn't.
-    //GranularTimeAdjust(source, out, numChannels, sampleRate, 0.5f, 0.02f, 0.02f);
-    //WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
-
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 1.2f, 0.02f, 0.01f);
-    WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
 }
 
 /*
 
 TODO:
 
-* it sounds like there is a lot of popping in the output, i wonder why
- * maybe do the zero crossings version and come back to this?
- * problem: zero crossings don't work in stereo unless you handle each channel separately
- * it may be the short linear crossfades which make this popping. If so, that sucks.
+* for zero crossings one, do each channel individually yeah! split the stereo into two mono's, process them, and recombine!
 
 * test 1, 2, 3, 4, byte formats for saving and loading. test their round trips too!
-
- * build w32 and x64
 
 * use granular synthesis to stretch and squish a sound without affecting frequency
 * also, adjust frequency without affecting length
