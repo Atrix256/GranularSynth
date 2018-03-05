@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <vector>
 #include <algorithm>
+#include <stdlib.h>
  
 // typedefs
 typedef uint16_t    uint16;
@@ -109,7 +110,10 @@ bool WriteWaveFile(const char *fileName, std::vector<float>& dataFloat, uint16 n
     FILE *File = nullptr;
     fopen_s(&File, fileName, "w+b");
     if (!File)
+    {
+        printf("[-----ERROR-----] Could not open %s for writing.\n", fileName);
         return false;
+    }
  
     SMinimalWaveFileHeader waveHeader;
  
@@ -140,6 +144,7 @@ bool WriteWaveFile(const char *fileName, std::vector<float>& dataFloat, uint16 n
  
     //close the file and return success
     fclose(File);
+    printf("%s saved.\n", fileName);
     return true;
 }
 
@@ -150,6 +155,7 @@ bool ReadFileIntoMemory (const char *fileName, std::vector<unsigned char>& data)
     fopen_s(&file, fileName, "rb");
     if (!file)
     {
+        printf("[-----ERROR-----]Could not open %s for reading.\n", fileName);
         return false;
     }
 
@@ -175,20 +181,29 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
     size_t fileIndex = 0;
 
 	//make sure the main chunk ID is "RIFF"
-	if((fileData.size() < fileIndex + 4) || memcmp(&fileData[fileIndex],"RIFF", 4))
-		return false;
+    if ((fileData.size() < fileIndex + 4) || memcmp(&fileData[fileIndex], "RIFF", 4))
+    {
+        printf("[-----ERROR-----]%s is an invalid input file. (1)\n", fileName);
+        return false;
+    }
     fileIndex += 4;
 
 	//get the main chunk size
 	uint32 chunkSize;
     if (fileData.size() < fileIndex + 4)
+    {
+        printf("[-----ERROR-----]%s is an invalid input file. (2)\n", fileName);
         return false;
+    }
     chunkSize = *(uint32*)&fileData[fileIndex];
     fileIndex += 4;
 
 	//make sure the format is "WAVE"
     if ((fileData.size() < fileIndex + 4) || memcmp(&fileData[fileIndex], "WAVE", 4))
+    {
+        printf("[-----ERROR-----]%s is an invalid input file. (3)\n", fileName);
         return false;
+    }
     fileIndex += 4;
 
 	size_t chunkPosFmt = -1;
@@ -197,7 +212,10 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	{
         // get a chunk id and chunk size if we can
         if (fileData.size() < fileIndex + 8)
+        {
+            printf("[-----ERROR-----]%s is an invalid input file. (4)\n", fileName);
             return false;
+        }
 
         // get the chunk id if we can
         const unsigned char* chunkID = (unsigned char*)&fileData[fileIndex];
@@ -226,14 +244,20 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	//load the fmt part if we can
     fileIndex = chunkPosFmt;
     if (fileData.size() < fileIndex + 24)
+    {
+        printf("[-----ERROR-----]%s is an invalid input file. (5)\n", fileName);
         return false;
+    }
     memcpy(&waveData.m_subChunk1ID, &fileData[fileIndex], 24);
     fileIndex += 24;
 
 	//load the data part if we can
     fileIndex = chunkPosData;
     if (fileData.size() < fileIndex + 8)
+    {
+        printf("[-----ERROR-----]%s is an invalid input file. (6)\n", fileName);
         return false;
+    }
     memcpy(&waveData.m_subChunk2ID, &fileData[fileIndex], 8);
     fileIndex += 8;
 
@@ -244,9 +268,10 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	   waveData.m_bitsPerSample > 32 ||     //32 bits per sample max
 	   waveData.m_bitsPerSample % 8 != 0 || //must be a multiple of 8 bites
 	   waveData.m_blockAlign > 8)           //blocks must be 8 bytes or lower
-	{
-		return false;
-	}
+    {
+        printf("[-----ERROR-----]%s is an invalid input file. (7)\n", fileName);
+        return false;
+    }
 
 	//figure out how many samples and blocks there are total in the source data
     size_t bytesPerSample = waveData.m_blockAlign / waveData.m_numChannels;
@@ -257,7 +282,10 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 
 	//read in the source samples at whatever sample rate / number of channels it might be in
     if (fileData.size() < fileIndex + numSourceSamples * bytesPerSample)
+    {
+        printf("[-----ERROR-----]%s is an invalid input file. (8)\n", fileName);
         return false;
+    }
 
 	for(size_t nIndex = 0; nIndex < numSourceSamples; ++nIndex)
 	{	
@@ -269,7 +297,21 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
     numChannels = waveData.m_numChannels;
     sampleRate = waveData.m_sampleRate;
     numBytes = waveData.m_bitsPerSample / 8;
+
+    printf("%s loaded.\n", fileName);
 	return true;
+}
+
+inline float SampleChannelFractional (const std::vector<float>& input, float sampleFloat, uint16 channel, uint16 numChannels)
+{
+    // TODO: cubic hermite interpolate for better results
+
+    size_t sample = size_t(sampleFloat);
+    float sampleFraction = sampleFloat - std::floorf(sampleFloat);
+
+    float value1 = sample * numChannels + channel < input.size() ? input[sample * numChannels + channel] : *input.rbegin();
+    float value2 = (sample + 1) * numChannels + channel < input.size() ? input[(sample + 1) * numChannels + channel] : *input.rbegin();
+    return value1 * (1.0f - sampleFraction) + value2 * sampleFraction;
 }
 
 // Resample
@@ -284,22 +326,14 @@ void TimeAdjust (const std::vector<float>& input, std::vector<float>& output, ui
         float percent = float(outSample) / float(numOutSamples-1);
 
         float srcSampleFloat = float(numSrcSamples) * percent;
-        
-        size_t srcSample = size_t(srcSampleFloat);
-        float srcSampleFraction = srcSampleFloat - std::floorf(srcSampleFloat);
 
         for (uint16 channel = 0; channel < numChannels; ++channel)
-        {
-            // linear interpolate samples. Cubic hermite would give better results, but this isn't the main point of the program and linear works well enough.
-            float value1 = srcSample * numChannels + channel < input.size() ? input[srcSample * numChannels + channel] : *input.rbegin();
-            float value2 = (srcSample + 1) * numChannels + channel < input.size() ? input[(srcSample + 1) * numChannels + channel] : *input.rbegin();
-            output[outSample*numChannels + channel] = value1 * (1.0f - srcSampleFraction) + value2 * srcSampleFraction;
-        }
+            output[outSample*numChannels + channel] = SampleChannelFractional(input, srcSampleFloat, channel, numChannels);
     }
 }
 
 // writes a grain to the output buffer, applying a fade in or fade out at the beginning if it should.
-size_t SplatGrainToOutput (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, size_t grainStart, size_t grainSize, size_t outputSampleIndex, ECrossFade crossFade, size_t crossFadeSize)
+size_t SplatGrainToOutput (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, size_t grainStart, size_t grainSize, size_t outputSampleIndex, ECrossFade crossFade, size_t crossFadeSize, float pitchMultiplier)
 {
     // Enforce input and output array size constraints
     size_t numInputSamples = input.size() / numChannels;
@@ -340,7 +374,7 @@ size_t SplatGrainToOutput (const std::vector<float>& input, std::vector<float>& 
     return grainSize;
 }
 
-void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float timeMultiplier, float grainSizeSeconds, float crossFadeSeconds)
+void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float timeMultiplier, float pitchMultiplier, float grainSizeSeconds, float crossFadeSeconds)
 {
     // calculate size of output buffer and resize it
     size_t numInputSamples = input.size() / numChannels;
@@ -375,15 +409,15 @@ void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& ou
             // if we are writing our first grain, or the last grain we wrote was the previous grain, then we don't need to do a cross fade`
             if ((lastGrainWritten == -1) || (lastGrainWritten == grain - 1))
             {
-                outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::None, crossFadeSizeSamples);
+                outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::None, crossFadeSizeSamples, pitchMultiplier);
                 lastGrainWritten = grain;
                 continue;
             }
 
             // else we need to fade out the old grain and then fade in the new one.
             // NOTE: fading out the old grain means starting to play the grain after the last one and bringing it's volume down to zero.
-            SplatGrainToOutput(input, output, numChannels, (lastGrainWritten + 1) * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples);
-            outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::In, crossFadeSizeSamples);
+            SplatGrainToOutput(input, output, numChannels, (lastGrainWritten + 1) * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples, pitchMultiplier);
+            outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::In, crossFadeSizeSamples, pitchMultiplier);
             lastGrainWritten = grain;
         }
     }
@@ -494,58 +528,70 @@ int main(int argc, char **argv)
 
     // speed up audio without affecting pitch
     {
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 0.02f, 0.002f);
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 1.0f, 0.02f, 0.002f);
         WriteWaveFile("out_B_Fast.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.4f, 0.02f, 0.002f);
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.4f, 1.0f, 0.02f, 0.002f);
         WriteWaveFile("out_B_Faster.wav", out, numChannels, sampleRate, numBytes);
     }
 
     // slow down audio without affecting pitch
     {
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.02f, 0.002f);
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 1.0f, 0.02f, 0.002f);
         WriteWaveFile("out_B_Slow.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 2.1f, 0.02f, 0.002f);
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 2.1f, 1.0f, 0.02f, 0.002f);
         WriteWaveFile("out_B_Slower.wav", out, numChannels, sampleRate, numBytes);
     }
 
     // Make pitch higher without affecting length
     {
-        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.7f, 0.02f, 0.002f);
+        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.7f, 1.0f, 0.02f, 0.002f);
         TimeAdjust(out2, out, numChannels, 0.7f);
         WriteWaveFile("out_C_High.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.4f, 0.02f, 0.002f);
+        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.4f, 1.0f, 0.02f, 0.002f);
         TimeAdjust(out2, out, numChannels, 0.4f);
         WriteWaveFile("out_C_Higher.wav", out, numChannels, sampleRate, numBytes);
     }
 
     // make pitch lower without affecting length
     {
-        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 1.3f, 0.02f, 0.002f);
+        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 1.3f, 1.0f, 0.02f, 0.002f);
         TimeAdjust(out2, out, numChannels, 1.3f);
         WriteWaveFile("out_C_Low.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 2.1f, 0.02f, 0.002f);
+        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 2.1f, 1.0f, 0.02f, 0.002f);
         TimeAdjust(out2, out, numChannels, 2.1f);
         WriteWaveFile("out_C_Lower.wav", out, numChannels, sampleRate, numBytes);
     }
 #endif
 
+    /*
     // TODO: this more adjusts playback speed on a sine wave, not pitch!!  I think you would need a TimeAdjustDynamic() to make it work
     // TODO: may need some kind of normalization constant (calculate it!) to get this to integrate to 1.0 to not affect pitch or speed (whichever should be left alone)
+
+    // TODO: i think the function has to integrate to 1.
+    // Note that this does. Check wolfram alpha: integrate y=(sin(2*pi*x)+1.0) from 0 to 1
 
     // adjust pitch on a sine wave
     GranularTimeAdjustDynamic(source, out2, numChannels, sampleRate, 0.02f, 0.002f,
         [] (float percent)
         {
-            return (std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 1.5f + 0.5f;
+            // TODO: i think whatever function you give it needs to integrate to 1.0 from 0 to 1. maybe get a normalization constant when calculating length!
+            return std::sinf(sin(2 * c_pi*percent) + 1.0);
+
+            //return (std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 1.5f + 0.5f;
         }
     );
     float ratio = float(source.size()) / float(out2.size());
     TimeAdjust(out2, out, numChannels, ratio);
     WriteWaveFile("out_D.wav", out, numChannels, sampleRate, numBytes);
+    */
+
+    system("pause");
+
+    // TODO: do one where the speed is slow but the pitch is high, and one where the speed is fast but the pitch is low
 }
 
 /*
