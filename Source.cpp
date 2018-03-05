@@ -302,6 +302,19 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	return true;
 }
 
+// Cubic hermite interpolation. More information available here: https://blog.demofox.org/2015/08/08/cubic-hermite-interpolation/
+// t is a value that goes from 0 to 1 to interpolate in a C1 continuous way across uniformly sampled data points.
+// when t is 0, this will return B.  When t is 1, this will return C.
+static float CubicHermite (float A, float B, float C, float D, float t)
+{
+    float a = -A/2.0f + (3.0f*B)/2.0f - (3.0f*C)/2.0f + D/2.0f;
+    float b = A - (5.0f*B)/2.0f + 2.0f*C - D / 2.0f;
+    float c = -A/2.0f + C/2.0f;
+    float d = B;
+ 
+    return a*t*t*t + b*t*t + c*t + d;
+}
+
 inline float SampleChannelFractional (const std::vector<float>& input, float sampleFloat, uint16 channel, uint16 numChannels)
 {
     // This uses linear interpolation to get values between samples.
@@ -346,9 +359,8 @@ size_t SplatGrainToOutput(const std::vector<float>& input, std::vector<float>& o
     size_t outputIndex = outputSampleIndex * numChannels;
 
     // write the samples
-    float sampleIncrement = 1.0f / pitchMultiplier;
     size_t numSamplesWritten = 0;
-    for (float sample = 0; sample < float(grainSize); sample += sampleIncrement)
+    for (float sample = 0; sample < float(grainSize); sample += pitchMultiplier)
     {
         // break out of the loop if we are out of bounds on the input or output
         if (outputIndex + numChannels > output.size())
@@ -393,7 +405,7 @@ size_t SplatGrainToOutput(const std::vector<float>& input, std::vector<float>& o
     return numSamplesWritten;
 }
 
-void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float timeMultiplier, float pitchMultiplier, float grainSizeSeconds, float crossFadeSeconds)
+void GranularTimePitchAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float timeMultiplier, float pitchMultiplier, float grainSizeSeconds, float crossFadeSeconds)
 {
     // calculate size of output buffer and resize it
     size_t numInputSamples = input.size() / numChannels;
@@ -445,7 +457,7 @@ void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& ou
 }
 
 template <typename LAMBDA>
-void GranularTimeAdjustDynamic (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float grainSizeSeconds, float crossFadeSeconds, const LAMBDA& timeMultiplierCallback )
+void GranularTimePitchAdjustDynamic (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float grainSizeSeconds, float crossFadeSeconds, const LAMBDA& settingsCallback)
 {
     // calculate how many grains are in the input data
     size_t numInputSamples = input.size() / numChannels;
@@ -464,7 +476,9 @@ void GranularTimeAdjustDynamic (const std::vector<float>& input, std::vector<flo
         size_t grainSize = grainEnd - grainStart;
 
         float percent = float(i) / float(numGrains);
-        float timeMultiplier = timeMultiplierCallback(percent);
+        float timeMultiplier = 1.0f;
+        float pitchMultiplier = 1.0f;
+        settingsCallback(percent, timeMultiplier, pitchMultiplier);
 
         numOutputSamples += (size_t)(float(grainSize) * timeMultiplier);
     }
@@ -477,6 +491,7 @@ void GranularTimeAdjustDynamic (const std::vector<float>& input, std::vector<flo
     // Repeat each grain 0 or more times to make the output be the correct size
     size_t outputSampleIndex = 0;
     size_t lastGrainWritten = -1;
+    float lastGrainPitchMultiplier = 1.0f;
     size_t outputSampleWindowEnd = 0;
     for (size_t grain = 0; grain < numGrains; ++grain)
     {
@@ -485,26 +500,32 @@ void GranularTimeAdjustDynamic (const std::vector<float>& input, std::vector<flo
 
         // calculate the end of where this grain should go in the output buffer
         float percent = float(grain) / float(numGrains);
-        float timeMultiplier = timeMultiplierCallback(percent);
+        float timeMultiplier = 1.0f;
+        float pitchMultiplier = 1.0f;
+        settingsCallback(percent, timeMultiplier, pitchMultiplier);
         outputSampleWindowEnd += size_t(float(grainSizeSamples) * timeMultiplier);
 
         // Splat out zero or more copies of the grain to get our output to be at least as far as we want it to be.
         // Zero copies happens when we shorten time and need to cut pieces (grains) out of the original sound
         while (outputSampleIndex < outputSampleWindowEnd)
         {
+            bool isFinalGrain = (grain == numGrains - 1);
+
             // if we are writing our first grain, or the last grain we wrote was the previous grain, then we don't need to do a cross fade`
             if ((lastGrainWritten == -1) || (lastGrainWritten == grain - 1))
             {
-                outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::None, crossFadeSizeSamples);
+                outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::None, crossFadeSizeSamples, pitchMultiplier, isFinalGrain);
                 lastGrainWritten = grain;
+                lastGrainPitchMultiplier = pitchMultiplier;
                 continue;
             }
 
             // else we need to fade out the old grain and then fade in the new one.
-            // NOTE: fading out the old grain means starting to play the grain after the last one and bringing it's volume down to zero.
-            SplatGrainToOutput(input, output, numChannels, (lastGrainWritten + 1) * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples);
-            outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::In, crossFadeSizeSamples);
+            // NOTE: fading out the old grain means starting to play the grain after the last one and bringing it's volume down to zero, using the previous grain's pitch multiplier.
+            SplatGrainToOutput(input, output, numChannels, (lastGrainWritten + 1) * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples, lastGrainPitchMultiplier, isFinalGrain);
+            outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::In, crossFadeSizeSamples, pitchMultiplier, isFinalGrain);
             lastGrainWritten = grain;
+            lastGrainPitchMultiplier = pitchMultiplier;
         }
     }
 }
@@ -539,19 +560,19 @@ int main(int argc, char **argv)
 
     // speed up audio without affecting pitch
     {
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 1.0f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 0.7f, 1.0f, 0.02f, 0.002f);
         WriteWaveFile("out_B_Fast.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.4f, 1.0f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 0.4f, 1.0f, 0.02f, 0.002f);
         WriteWaveFile("out_B_Faster.wav", out, numChannels, sampleRate, numBytes);
     }
 
     // slow down audio without affecting pitch
     {
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 1.0f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 1.3f, 1.0f, 0.02f, 0.002f);
         WriteWaveFile("out_B_Slow.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 2.1f, 1.0f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 2.1f, 1.0f, 0.02f, 0.002f);
         WriteWaveFile("out_B_Slower.wav", out, numChannels, sampleRate, numBytes);
     }
 
@@ -559,62 +580,76 @@ int main(int argc, char **argv)
     {
         // do it in two steps - first as a granular time adjust, and then as a pitch/time adjust
         std::vector<float> out2;
-        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.7f, 1.0f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.7f, 1.0f, 0.02f, 0.002f);
         TimeAdjust(out2, out, numChannels, 0.7f);
         WriteWaveFile("out_C_HighAlternate.wav", out, numChannels, sampleRate, numBytes);
 
         // do it in one step by changing grain playback speeds
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.0f, 0.7f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 1.0f, 1.0f / 0.7f, 0.02f, 0.002f);
         WriteWaveFile("out_C_High.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.0f, 0.4f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 1.0f, 1.0f / 0.4f, 0.02f, 0.002f);
         WriteWaveFile("out_C_Higher.wav", out, numChannels, sampleRate, numBytes);
     }
 
     // make pitch lower without affecting length
     {
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.0f, 1.3f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 1.0f, 1.0f / 1.3f, 0.02f, 0.002f);
         WriteWaveFile("out_C_Low.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.0f, 2.1f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 1.0f, 1.0f / 2.1f, 0.02f, 0.002f);
         WriteWaveFile("out_C_Lower.wav", out, numChannels, sampleRate, numBytes);
     }
 
     // Make pitch lower but speed higher
     {
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.7f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 1.3f, 1.0f / 0.7f, 0.02f, 0.002f);
         WriteWaveFile("out_D_SlowHigh.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 1.3f, 0.02f, 0.002f);
+        GranularTimePitchAdjust(source, out, numChannels, sampleRate, 0.7f, 1.0f / 1.3f, 0.02f, 0.002f);
         WriteWaveFile("out_D_FastLow.wav", out, numChannels, sampleRate, numBytes);
     }
 
+    // dynamic tests which change time and pitch multipliers over time (for each input grain)
+    {
+        // adjust pitch on a sine wave
+        GranularTimePitchAdjustDynamic(source, out, numChannels, sampleRate, 0.02f, 0.002f,
+            [] (float percent, float& timeMultiplier, float& pitchMultiplier)
+            {
+                // time is 1
+                // pitch is 10hz from 0.72 to 1.25
+                timeMultiplier = 1.0f;
+                pitchMultiplier = 1.0f / ((std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 0.5f + 0.75f);
+            }
+        );
+        WriteWaveFile("out_E_Pitch.wav", out, numChannels, sampleRate, numBytes);
 
-    /*
-    // TODO: this more adjusts playback speed on a sine wave, not pitch!!  I think you would need a TimeAdjustDynamic() to make it work
-    // TODO: may need some kind of normalization constant (calculate it!) to get this to integrate to 1.0 to not affect pitch or speed (whichever should be left alone)
+        // adjust speed on a sine wave
+        GranularTimePitchAdjustDynamic(source, out, numChannels, sampleRate, 0.02f, 0.002f,
+            [] (float percent, float& timeMultiplier, float& pitchMultiplier)
+            {
+                // time is 13hz from 0.5 to 2.5
+                // pitch is 1
+                timeMultiplier = (std::sinf(percent * c_pi * 13.0f) * 0.5f + 0.5f) * 2.0f + 0.5f;
+                pitchMultiplier = 1.0f;
+            }
+        );
+        WriteWaveFile("out_E_Time.wav", out, numChannels, sampleRate, numBytes);
 
-    // TODO: i think the function has to integrate to 1.
-    // Note that this does. Check wolfram alpha: integrate y=(sin(2*pi*x)+1.0) from 0 to 1
-
-    // adjust pitch on a sine wave
-    GranularTimeAdjustDynamic(source, out2, numChannels, sampleRate, 0.02f, 0.002f,
-        [] (float percent)
-        {
-            // TODO: i think whatever function you give it needs to integrate to 1.0 from 0 to 1. maybe get a normalization constant when calculating length!
-            return std::sinf(sin(2 * c_pi*percent) + 1.0);
-
-            //return (std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 1.5f + 0.5f;
-        }
-    );
-    float ratio = float(source.size()) / float(out2.size());
-    TimeAdjust(out2, out, numChannels, ratio);
-    WriteWaveFile("out_D.wav", out, numChannels, sampleRate, numBytes);
-    */
+        // adjust time and speed on a sine wave
+        GranularTimePitchAdjustDynamic(source, out, numChannels, sampleRate, 0.02f, 0.002f,
+            [] (float percent, float& timeMultiplier, float& pitchMultiplier)
+            {
+                // time is 13hz from 0.5 to 2.5
+                // pitch is 10hz from 0.72 to 1.25
+                timeMultiplier = (std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 2.0f + 0.5f;
+                pitchMultiplier = 1.0f / ((std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 0.5f + 0.75f);
+            }
+        );
+        WriteWaveFile("out_E_TimePitch.wav", out, numChannels, sampleRate, numBytes);
+    }
 
     system("pause");
-
-    // TODO: do one where the speed is slow but the pitch is high, and one where the speed is fast but the pitch is low
 }
 
 /*
@@ -622,8 +657,6 @@ int main(int argc, char **argv)
 TODO:
 
 * get cubic hermite interpolation working instead of lerp for sample interpolation, for better results
-
-* experiment with grain size and envelope size etc
 
 BLOG:
 
@@ -641,5 +674,7 @@ https://www.granularsynthesis.com/hthesis/grain.html
 
 * zero crossings don't work in stereo unless you handle each channel separately
 * mention zero crossings as an alternate to enveloping. I didn't try it.
+
+* mention that we use lerp but could use hermite interpolation instead (link) for higher quality
 
 */
