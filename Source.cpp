@@ -8,6 +8,8 @@
 typedef uint16_t    uint16;
 typedef uint32_t    uint32;
 typedef int32_t     int32;
+
+const float c_pi = 3.14159265359f;
  
 //this struct is the minimal required header data for a wav file
 struct SMinimalWaveFileHeader
@@ -43,6 +45,13 @@ enum class ECrossFade
 
 inline void FloatToPCM(unsigned char *PCM, const float& in, size_t numBytes)
 {
+    // 8 bit is unsigned
+    if (numBytes == 1)
+    {
+        PCM[0] = unsigned char((in * 0.5f + 0.5f) * 255.0f);
+        return;
+    }
+
     // casting to double because floats can't exactly store 0x7fffffff, but doubles can.
     // Details of that: https://blog.demofox.org/2017/11/21/floating-point-precision/
     uint32 data;
@@ -55,20 +64,25 @@ inline void FloatToPCM(unsigned char *PCM, const float& in, size_t numBytes)
     {
         case 4: PCM[3] = ((data >> 24) & 0xFF); PCM[2] = ((data >> 16) & 0xFF); PCM[1] = ((data >> 8) & 0xFF); PCM[0] = (data & 0xFF); break;
         case 3: PCM[2] = ((data >> 24) & 0xFF); PCM[1] = ((data >> 16) & 0xFF); PCM[0] = ((data >> 8) & 0xFF); break;
-        case 2: PCM[1] = ((data >> 24) & 0xFF); PCM[0] = ((data >> 16) & 0xFF); break; 
-        case 1: PCM[0] = ((data >> 24) & 0xFF); break;
+        case 2: PCM[1] = ((data >> 24) & 0xFF); PCM[0] = ((data >> 16) & 0xFF); break;
     }
 }
 
 inline void PCMToFloat(float& out, const unsigned char *PCM, size_t numBytes)
 {
+    // 8 bit is unsigned
+    if (numBytes == 1)
+    {
+        out = (float(PCM[0]) / float(255.0f)) * 2.0f - 1.0f;
+        return;
+    }
+
     uint32 data = 0;
     switch (numBytes)
     {
         case 4: data = (uint32(PCM[3]) << 24) | (uint32(PCM[2]) << 16) | (uint32(PCM[1]) << 8) | uint32(PCM[0]); break;
         case 3: data = (uint32(PCM[2]) << 24) | (uint32(PCM[1]) << 16) | (uint32(PCM[0]) << 8); break;
         case 2: data = (uint32(PCM[1]) << 24) | (uint32(PCM[0]) << 16); break;
-        case 1: data = (uint32(PCM[0]) << 24); break;
     }
 
     // casting to double because floats can't exactly store 0x7fffffff, but doubles can.
@@ -79,16 +93,17 @@ inline void PCMToFloat(float& out, const unsigned char *PCM, size_t numBytes)
         out = float(double(data) / double(0x7fffffff));
 }
 
-// TODO: make this function take bytes per sample, 1, 2, 3, or 4!
-bool WriteWaveFile(const char *fileName, std::vector<float>& dataFloat, uint16 numChannels, uint32 sampleRate)
+// numBytes can be 1, 2, 3, or 4.
+// Coresponding to 8 bit, 16 bit, 24 bit, and 32 bit audio.
+bool WriteWaveFile(const char *fileName, std::vector<float>& dataFloat, uint16 numChannels, uint32 sampleRate, uint16 numBytes)
 {
-    std::vector<int32> data;
-    data.resize(dataFloat.size());
+    std::vector<unsigned char> data;
+    data.resize(dataFloat.size() * numBytes);
     for (size_t i = 0; i < dataFloat.size(); ++i)
-        FloatToPCM((unsigned char*)&data[i], dataFloat[i], 4);
+        FloatToPCM((unsigned char*)&data[i*numBytes], dataFloat[i], numBytes);
 
-    uint32 dataSize = (uint32)(data.size() * sizeof(int32));
-    uint16 bitsPerSample = sizeof(int32) * 8;
+    uint32 dataSize = (uint32)data.size();
+    uint16 bitsPerSample = numBytes * 8;
  
     //open the file if we can
     FILE *File = nullptr;
@@ -151,7 +166,7 @@ bool ReadFileIntoMemory (const char *fileName, std::vector<unsigned char>& data)
     return true;
 }
 
-bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numChannels, uint32& sampleRate)
+bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numChannels, uint32& sampleRate, uint16& numBytes)
 {
     // read the whole file into memory if we can
     std::vector<unsigned char> fileData;
@@ -253,6 +268,7 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	//return our data
     numChannels = waveData.m_numChannels;
     sampleRate = waveData.m_sampleRate;
+    numBytes = waveData.m_bitsPerSample / 8;
 	return true;
 }
 
@@ -373,14 +389,80 @@ void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& ou
     }
 }
 
+template <typename LAMBDA>
+void GranularTimeAdjustDynamic (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float grainSizeSeconds, float crossFadeSeconds, const LAMBDA& timeMultiplierCallback )
+{
+    // calculate how many grains are in the input data
+    size_t numInputSamples = input.size() / numChannels;
+    size_t grainSizeSamples = size_t(float(sampleRate)*grainSizeSeconds);
+    size_t numGrains = numInputSamples / grainSizeSamples;
+    if (numInputSamples % grainSizeSamples)
+        numGrains++;
+
+    // calculate size of output buffer and resize it
+    size_t numOutputSamples = 0;
+    for (size_t i = 0; i < numGrains; ++i)
+    {
+        size_t grainStart = i * grainSizeSamples;
+        size_t grainEnd = grainStart + grainSizeSamples;
+        grainEnd = std::min(grainEnd, input.size());
+        size_t grainSize = grainEnd - grainStart;
+
+        float percent = float(i) / float(numGrains);
+        float timeMultiplier = timeMultiplierCallback(percent);
+
+        numOutputSamples += (size_t)(float(grainSize) * timeMultiplier);
+    }
+    output.clear();
+    output.resize(numOutputSamples * numChannels, 0.0f);
+
+    // calculate the cross fade size
+    size_t crossFadeSizeSamples = size_t(float(sampleRate)*crossFadeSeconds);
+
+    // Repeat each grain 0 or more times to make the output be the correct size
+    size_t outputSampleIndex = 0;
+    size_t lastGrainWritten = -1;
+    size_t outputSampleWindowEnd = 0;
+    for (size_t grain = 0; grain < numGrains; ++grain)
+    {
+        // calculate the boundaries of the grain
+        size_t inputGrainStart = grain * grainSizeSamples;
+
+        // calculate the end of where this grain should go in the output buffer
+        float percent = float(grain) / float(numGrains);
+        float timeMultiplier = timeMultiplierCallback(percent);
+        outputSampleWindowEnd += size_t(float(grainSizeSamples) * timeMultiplier);
+
+        // Splat out zero or more copies of the grain to get our output to be at least as far as we want it to be.
+        // Zero copies happens when we shorten time and need to cut pieces (grains) out of the original sound
+        while (outputSampleIndex < outputSampleWindowEnd)
+        {
+            // if we are writing our first grain, or the last grain we wrote was the previous grain, then we don't need to do a cross fade`
+            if ((lastGrainWritten == -1) || (lastGrainWritten == grain - 1))
+            {
+                outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::None, crossFadeSizeSamples);
+                lastGrainWritten = grain;
+                continue;
+            }
+
+            // else we need to fade out the old grain and then fade in the new one.
+            // NOTE: fading out the old grain means starting to play the grain after the last one and bringing it's volume down to zero.
+            SplatGrainToOutput(input, output, numChannels, (lastGrainWritten + 1) * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples);
+            outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::In, crossFadeSizeSamples);
+            lastGrainWritten = grain;
+        }
+    }
+}
+
 //the entry point of our application
 int main(int argc, char **argv)
 {
     // load the wave file
     uint16 numChannels;
     uint32 sampleRate;
+    uint16 numBytes;
     std::vector<float> source, out, out2, sourceLeft, sourceRight;
-    ReadWaveFile("legend1.wav", source, numChannels, sampleRate);
+    ReadWaveFile("legend1.wav", source, numChannels, sampleRate, numBytes);
 
     // split the stereo into two mono channels
     sourceLeft.resize(source.size() / numChannels);
@@ -388,71 +470,99 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < sourceLeft.size(); ++i)
     {
         sourceLeft[i] = source[i*numChannels];
-        sourceRight[i] = source[i*numChannels+1];
+        sourceRight[i] = source[i*numChannels + 1];
     }
 
-    // TODO: enable before final checkin
 #if 1
     // speed up the audio and increase pitch
-    TimeAdjust(source, out, numChannels, 0.7f);
-    WriteWaveFile("out_A_FastHigh.wav", out, numChannels, sampleRate);
+    {
+        TimeAdjust(source, out, numChannels, 0.7f);
+        WriteWaveFile("out_A_FastHigh.wav", out, numChannels, sampleRate, numBytes);
+
+        TimeAdjust(source, out, numChannels, 0.4f);
+        WriteWaveFile("out_A_FasterHigher.wav", out, numChannels, sampleRate, numBytes);
+    }
 
     // slow down the audio and decrease pitch
-    TimeAdjust(source, out, numChannels, 1.3f);
-    WriteWaveFile("out_A_SlowLow.wav", out, numChannels, sampleRate);
+    {
+        TimeAdjust(source, out, numChannels, 1.3f);
+        WriteWaveFile("out_A_SlowLow.wav", out, numChannels, sampleRate, numBytes);
+
+        TimeAdjust(source, out, numChannels, 2.1f);
+        WriteWaveFile("out_A_SlowerLower.wav", out, numChannels, sampleRate, numBytes);
+    }
 
     // speed up audio without affecting pitch
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 0.02f, 0.002f);
-    WriteWaveFile("out_B_Fast.wav", out, numChannels, sampleRate);
+    {
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 0.02f, 0.002f);
+        WriteWaveFile("out_B_Fast.wav", out, numChannels, sampleRate, numBytes);
 
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 0.4f, 0.02f, 0.002f);
-    WriteWaveFile("out_B_Faster.wav", out, numChannels, sampleRate);
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.4f, 0.02f, 0.002f);
+        WriteWaveFile("out_B_Faster.wav", out, numChannels, sampleRate, numBytes);
+    }
 
     // slow down audio without affecting pitch
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.02f, 0.002f);
-    WriteWaveFile("out_B_Slow.wav", out, numChannels, sampleRate);
+    {
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.02f, 0.002f);
+        WriteWaveFile("out_B_Slow.wav", out, numChannels, sampleRate, numBytes);
 
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 2.1f, 0.02f, 0.002f);
-    WriteWaveFile("out_B_Slower.wav", out, numChannels, sampleRate);
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 2.1f, 0.02f, 0.002f);
+        WriteWaveFile("out_B_Slower.wav", out, numChannels, sampleRate, numBytes);
+    }
+
+    // Make pitch higher without affecting length
+    {
+        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.7f, 0.02f, 0.002f);
+        TimeAdjust(out2, out, numChannels, 0.7f);
+        WriteWaveFile("out_C_High.wav", out, numChannels, sampleRate, numBytes);
+
+        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.4f, 0.02f, 0.002f);
+        TimeAdjust(out2, out, numChannels, 0.4f);
+        WriteWaveFile("out_C_Higher.wav", out, numChannels, sampleRate, numBytes);
+    }
+
+    // make pitch lower without affecting length
+    {
+        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 1.3f, 0.02f, 0.002f);
+        TimeAdjust(out2, out, numChannels, 1.3f);
+        WriteWaveFile("out_C_Low.wav", out, numChannels, sampleRate, numBytes);
+
+        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 2.1f, 0.02f, 0.002f);
+        TimeAdjust(out2, out, numChannels, 2.1f);
+        WriteWaveFile("out_C_Lower.wav", out, numChannels, sampleRate, numBytes);
+    }
 #endif
 
-    // TODO: change pitch without affecting length. To do this, do a granular time adjust, then a regular time adjust!
-    // TODO: get cubic hermite instead of linear interpolation, to help the granular results quality
-    // TODO: maybe make a wrapper function that makes these calls??
-    GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.4f, 0.02f, 0.002f);
-    TimeAdjust(out2, out, numChannels, 1.0f / 1.4f);
-    WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
+    // TODO: this more adjusts playback speed on a sine wave, not pitch!!  I think you would need a TimeAdjustDynamic() to make it work
+    // TODO: may need some kind of normalization constant (calculate it!) to get this to integrate to 1.0 to not affect pitch or speed (whichever should be left alone)
 
-    GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 1.4f, 0.02f, 0.002f);
-    TimeAdjust(out2, out, numChannels, 1.4f);
-    WriteWaveFile("out_D.wav", out, numChannels, sampleRate);
-
-
-    // TODO: autotune it to twinkle twinkle, and/or put it on a sine wave!
-
-    //WriteWaveFile("out.wav", source, numChannels, sampleRate);
-
+    // adjust pitch on a sine wave
+    GranularTimeAdjustDynamic(source, out2, numChannels, sampleRate, 0.02f, 0.002f,
+        [] (float percent)
+        {
+            return (std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 1.5f + 0.5f;
+        }
+    );
+    float ratio = float(source.size()) / float(out2.size());
+    TimeAdjust(out2, out, numChannels, ratio);
+    WriteWaveFile("out_D.wav", out, numChannels, sampleRate, numBytes);
 }
 
 /*
 
 TODO:
 
+* do a zero crossings version
 * for zero crossings one, do each channel individually yeah! split the stereo into two mono's, process them, and recombine!
 
-* test 1, 2, 3, 4, byte formats for saving and loading. test their round trips too!
-
-* use granular synthesis to stretch and squish a sound without affecting frequency
-* also, adjust frequency without affecting length
-* auto tune? with note sliding
-
-* compare using zero crossings, cubic interpolation, and envelopes
+* get cubic hermite interpolation working instead of lerp for sample interpolation, for better results
 
 * experiment with grain size and envelope size etc
 
 BLOG:
 
 * Explain algorithm, give results, link to code and also include it!
+* get links & info from email
 
 https://granularsynthesis.com/guide.php
 
