@@ -174,10 +174,8 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
         return false;
     fileIndex += 4;
 
-    // TODO: clean up types used.
-
-	long chunkPosFmt = -1;
-	long chunkPosData = -1;
+	size_t chunkPosFmt = -1;
+	size_t chunkPosData = -1;
 	while(chunkPosFmt == -1 || chunkPosData == -1)
 	{
         // get a chunk id and chunk size if we can
@@ -256,6 +254,7 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	return true;
 }
 
+// Resample
 void TimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, float timeMultiplier)
 {
     size_t numSrcSamples = input.size() / numChannels;
@@ -281,6 +280,7 @@ void TimeAdjust (const std::vector<float>& input, std::vector<float>& output, ui
     }
 }
 
+// writes a grain to the output buffer, applying a fade in or fade out at the beginning if it should.
 size_t SplatGrainToOutput (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, size_t grainStart, size_t grainSize, size_t outputSampleIndex, ECrossFade crossFade, size_t crossFadeSize)
 {
     // Enforce input and output array size constraints
@@ -403,13 +403,9 @@ int main(int argc, char **argv)
     WriteWaveFile("out_B_Slower.wav", out, numChannels, sampleRate);
 #endif
 
-    // TODO: when making it shorter, do we skip granules?
-
     // TODO: change pitch without affecting length
 
     // TODO: autotune it to twinkle twinkle, and/or put it on a sine wave!
-    
-    // TODO: I think there may be some math issues with GranularTimeAdjust() and index calculations. I got a crash when switching to divide or passing reciprocal
 
     //WriteWaveFile("out.wav", source, numChannels, sampleRate);
 
