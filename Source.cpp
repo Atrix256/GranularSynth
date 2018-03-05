@@ -317,8 +317,33 @@ static float CubicHermite (float A, float B, float C, float D, float t)
 
 inline float SampleChannelFractional (const std::vector<float>& input, float sampleFloat, uint16 channel, uint16 numChannels)
 {
+    // change this to #if 0 to use linear interpolation instead, which is faster but lower quality
+#if 1
+
+    // This uses cubic hermite interpolation to get values between samples
+
+    size_t sample = size_t(sampleFloat);
+    float sampleFraction = sampleFloat - std::floorf(sampleFloat);
+
+    size_t sampleIndexNeg1 = (sample > 0) ? sample - 1 : sample;
+    size_t sampleIndex0 = sample;
+    size_t sampleIndex1 = sample + 1;
+    size_t sampleIndex2 = sample + 2;
+
+    sampleIndexNeg1 = sampleIndexNeg1 * numChannels + channel;
+    sampleIndex0 = sampleIndex0 * numChannels + channel;
+    sampleIndex1 = sampleIndex1 * numChannels + channel;
+    sampleIndex2 = sampleIndex2 * numChannels + channel;
+
+    sampleIndexNeg1 = std::min(sampleIndexNeg1, input.size() - 1);
+    sampleIndex0 = std::min(sampleIndex0, input.size() - 1);
+    sampleIndex1 = std::min(sampleIndex1, input.size() - 1);
+    sampleIndex2 = std::min(sampleIndex2, input.size() - 1);
+
+    return CubicHermite(input[sampleIndexNeg1], input[sampleIndex0], input[sampleIndex1], input[sampleIndex2], sampleFraction);
+#else
+
     // This uses linear interpolation to get values between samples.
-    // TODO: cubic hermite!
 
     size_t sample = size_t(sampleFloat);
     float sampleFraction = sampleFloat - std::floorf(sampleFloat);
@@ -332,6 +357,7 @@ inline float SampleChannelFractional (const std::vector<float>& input, float sam
     float value2 = input[sample1Index];
 
     return value1 * (1.0f - sampleFraction) + value2 * sampleFraction;
+#endif
 }
 
 // Resample
@@ -653,10 +679,6 @@ int main(int argc, char **argv)
 }
 
 /*
-
-TODO:
-
-* get cubic hermite interpolation working instead of lerp for sample interpolation, for better results
 
 BLOG:
 
