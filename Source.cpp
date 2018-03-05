@@ -71,10 +71,12 @@ inline void PCMToFloat(float& out, const unsigned char *PCM, size_t numBytes)
         case 1: data = (uint32(PCM[0]) << 24); break;
     }
 
+    // casting to double because floats can't exactly store 0x7fffffff, but doubles can.
+    // Details of that: https://blog.demofox.org/2017/11/21/floating-point-precision/
     if (data & 0x80000000)
-        out = float(int32(data)) / float(0x80000000);
+        out = float(double(int32(data)) / double(0x80000000));
     else
-        out = float(data) / float(0x7fffffff);
+        out = float(double(data) / double(0x7fffffff));
 }
 
 // TODO: make this function take bytes per sample, 1, 2, 3, or 4!
@@ -369,17 +371,24 @@ void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& ou
         }
     }
 }
- 
+
 //the entry point of our application
 int main(int argc, char **argv)
 {
+    // load the wave file
     uint16 numChannels;
     uint32 sampleRate;
-    std::vector<float> source, out;
+    std::vector<float> source, out, sourceMono;
     ReadWaveFile("legend2.wav", source, numChannels, sampleRate);
 
+    // make a mono version
+    std::vector<float> sourceMono;
+    sourceMono.resize(source.size() / numChannels);
+    for (size_t i = 0; i < sourceMono.size(); ++i)
+        sourceMono[i] = source[i*numChannels];
+
     // TODO: enable before final checkin
-#if 1
+#if 0
     // speed up the audio and increase pitch
     TimeAdjust(source, out, numChannels, 0.7f);
     WriteWaveFile("out_A_FastHigh.wav", out, numChannels, sampleRate);
@@ -414,7 +423,7 @@ int main(int argc, char **argv)
     //GranularTimeAdjust(source, out, numChannels, sampleRate, 0.5f, 0.02f, 0.02f);
     //WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
 
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 2.0f, 0.02f, 0.002f);
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 2.0f, 0.02f, 0.01f);
     WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
 }
 
@@ -424,6 +433,8 @@ TODO:
 
 * it sounds like there is a lot of popping in the output, i wonder why
  * maybe do the zero crossings version and come back to this?
+ * problem: zero crossings don't work in stereo unless you handle each channel separately
+ * it may be the short linear crossfades which make this popping. If so, that sucks.
 
 * test 1, 2, 3, 4, byte formats for saving and loading. test their round trips too!
 
@@ -449,5 +460,7 @@ https://www.granularsynthesis.com/hthesis/grain.html
 
 * note the thing about how on graphics cards there are two -1 values, to make conversion between types easier. same issues as pcm <-> float here!
  * http://www.yosoygames.com.ar/wp/2018/03/vertex-formats-part-1-compression/
+
+* zero crossings don't work in stereo unless you handle each channel separately
 
 */
