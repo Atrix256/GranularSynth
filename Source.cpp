@@ -304,13 +304,20 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 
 inline float SampleChannelFractional (const std::vector<float>& input, float sampleFloat, uint16 channel, uint16 numChannels)
 {
-    // TODO: cubic hermite interpolate for better results
+    // This uses linear interpolation to get values between samples.
+    // TODO: cubic hermite!
 
     size_t sample = size_t(sampleFloat);
     float sampleFraction = sampleFloat - std::floorf(sampleFloat);
 
-    float value1 = sample * numChannels + channel < input.size() ? input[sample * numChannels + channel] : *input.rbegin();
-    float value2 = (sample + 1) * numChannels + channel < input.size() ? input[(sample + 1) * numChannels + channel] : *input.rbegin();
+    size_t sample1Index = sample * numChannels + channel;
+    sample1Index = std::min(sample1Index, input.size() - 1);
+    float value1 = input[sample1Index];
+
+    size_t sample2Index = (sample+1) * numChannels + channel;
+    sample2Index = std::min(sample2Index, input.size() - 1);
+    float value2 = input[sample1Index];
+
     return value1 * (1.0f - sampleFraction) + value2 * sampleFraction;
 }
 
@@ -332,46 +339,58 @@ void TimeAdjust (const std::vector<float>& input, std::vector<float>& output, ui
     }
 }
 
-// writes a grain to the output buffer, applying a fade in or fade out at the beginning if it should.
-size_t SplatGrainToOutput (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, size_t grainStart, size_t grainSize, size_t outputSampleIndex, ECrossFade crossFade, size_t crossFadeSize, float pitchMultiplier)
+// writes a grain to the output buffer, applying a fade in or fade out at the beginning if it should, as well as a pitch multiplier (playback speed multiplier) for the grain
+size_t SplatGrainToOutput(const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, size_t grainStart, size_t grainSize, size_t outputSampleIndex, ECrossFade crossFade, size_t crossFadeSize, float pitchMultiplier, bool isFinalGrain)
 {
-    // Enforce input and output array size constraints
-    size_t numInputSamples = input.size() / numChannels;
-    if (grainStart + grainSize > numInputSamples)
-        grainSize = numInputSamples - grainStart;
-
-    size_t numOutputSamples = output.size() / numChannels;
-    if (outputSampleIndex + grainSize > numOutputSamples)
-        grainSize = numOutputSamples - outputSampleIndex;
-
     // calculate starting indices
-    size_t inputIndex = grainStart * numChannels;
     size_t outputIndex = outputSampleIndex * numChannels;
 
     // write the samples
-    for (size_t sample = 0; sample < grainSize; ++sample)
+    float sampleIncrement = 1.0f / pitchMultiplier;
+    size_t numSamplesWritten = 0;
+    for (float sample = 0; sample < float(grainSize); sample += sampleIncrement)
     {
+        // break out of the loop if we are out of bounds on the input or output
+        if (outputIndex + numChannels > output.size())
+            break;
+
+        float inputIndexSamples = float(grainStart) + sample;
+        if (size_t(inputIndexSamples) * numChannels + numChannels > input.size())
+            break;
+
         // calculate envelope for this sample
         float envelope = 1.0f;
         if (crossFade != ECrossFade::None)
         {
-            if (sample <= crossFadeSize)
-                envelope = float(sample) / float(crossFadeSize);
+            if (sample <= float(crossFadeSize))
+                envelope = sample / float(crossFadeSize);
             if (crossFade == ECrossFade::Out)
                 envelope = 1.0f - envelope;
         }
 
         // write the enveloped sample
-        for (size_t channel = 0; channel < numChannels; ++channel)
-            output[outputIndex + channel] += input[inputIndex + channel] * envelope;
+        for (uint16 channel = 0; channel < numChannels; ++channel)
+            output[outputIndex + channel] += SampleChannelFractional(input, inputIndexSamples, channel, numChannels) * envelope;
 
         // move to the next samples
-        inputIndex += numChannels;
         outputIndex += numChannels;
+        ++numSamplesWritten;
+    }
+
+    // report an error if ever the cross fade size was bigger than the actual grain size, since this causes popping and would be hard to find the cause of.
+    // suppress error on final grain since there can be false positives due to sound ending. That makes false negatives but calling this good enough.
+    if (!isFinalGrain && crossFadeSize > numSamplesWritten)
+    {
+        static bool reportedError = false;
+        if (!reportedError)
+        {
+            printf("[-----ERROR-----] cross fade is longer than a grain size! (error only reported once)\n");
+            reportedError = true;
+        }
     }
 
     // return how many samples we wrote
-    return grainSize;
+    return numSamplesWritten;
 }
 
 void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float timeMultiplier, float pitchMultiplier, float grainSizeSeconds, float crossFadeSeconds)
@@ -406,18 +425,20 @@ void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& ou
         // Zero copies happens when we shorten time and need to cut pieces (grains) out of the original sound
         while (outputSampleIndex < outputSampleWindowEnd)
         {
+            bool isFinalGrain = (grain == numGrains - 1);
+
             // if we are writing our first grain, or the last grain we wrote was the previous grain, then we don't need to do a cross fade`
             if ((lastGrainWritten == -1) || (lastGrainWritten == grain - 1))
             {
-                outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::None, crossFadeSizeSamples, pitchMultiplier);
+                outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::None, crossFadeSizeSamples, pitchMultiplier, isFinalGrain);
                 lastGrainWritten = grain;
                 continue;
             }
 
             // else we need to fade out the old grain and then fade in the new one.
             // NOTE: fading out the old grain means starting to play the grain after the last one and bringing it's volume down to zero.
-            SplatGrainToOutput(input, output, numChannels, (lastGrainWritten + 1) * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples, pitchMultiplier);
-            outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::In, crossFadeSizeSamples, pitchMultiplier);
+            SplatGrainToOutput(input, output, numChannels, (lastGrainWritten + 1) * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples, pitchMultiplier, isFinalGrain);
+            outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::In, crossFadeSizeSamples, pitchMultiplier, isFinalGrain);
             lastGrainWritten = grain;
         }
     }
@@ -495,19 +516,9 @@ int main(int argc, char **argv)
     uint16 numChannels;
     uint32 sampleRate;
     uint16 numBytes;
-    std::vector<float> source, out, out2, sourceLeft, sourceRight;
+    std::vector<float> source, out, sourceLeft, sourceRight;
     ReadWaveFile("legend1.wav", source, numChannels, sampleRate, numBytes);
 
-    // split the stereo into two mono channels
-    sourceLeft.resize(source.size() / numChannels);
-    sourceRight.resize(sourceLeft.size());
-    for (size_t i = 0; i < sourceLeft.size(); ++i)
-    {
-        sourceLeft[i] = source[i*numChannels];
-        sourceRight[i] = source[i*numChannels + 1];
-    }
-
-#if 1
     // speed up the audio and increase pitch
     {
         TimeAdjust(source, out, numChannels, 0.7f);
@@ -546,26 +557,38 @@ int main(int argc, char **argv)
 
     // Make pitch higher without affecting length
     {
+        // do it in two steps - first as a granular time adjust, and then as a pitch/time adjust
+        std::vector<float> out2;
         GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.7f, 1.0f, 0.02f, 0.002f);
         TimeAdjust(out2, out, numChannels, 0.7f);
+        WriteWaveFile("out_C_HighAlternate.wav", out, numChannels, sampleRate, numBytes);
+
+        // do it in one step by changing grain playback speeds
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.0f, 0.7f, 0.02f, 0.002f);
         WriteWaveFile("out_C_High.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 0.4f, 1.0f, 0.02f, 0.002f);
-        TimeAdjust(out2, out, numChannels, 0.4f);
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.0f, 0.4f, 0.02f, 0.002f);
         WriteWaveFile("out_C_Higher.wav", out, numChannels, sampleRate, numBytes);
     }
 
     // make pitch lower without affecting length
     {
-        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 1.3f, 1.0f, 0.02f, 0.002f);
-        TimeAdjust(out2, out, numChannels, 1.3f);
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.0f, 1.3f, 0.02f, 0.002f);
         WriteWaveFile("out_C_Low.wav", out, numChannels, sampleRate, numBytes);
 
-        GranularTimeAdjust(source, out2, numChannels, sampleRate, 1.0f / 2.1f, 1.0f, 0.02f, 0.002f);
-        TimeAdjust(out2, out, numChannels, 2.1f);
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.0f, 2.1f, 0.02f, 0.002f);
         WriteWaveFile("out_C_Lower.wav", out, numChannels, sampleRate, numBytes);
     }
-#endif
+
+    // Make pitch lower but speed higher
+    {
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.7f, 0.02f, 0.002f);
+        WriteWaveFile("out_D_SlowHigh.wav", out, numChannels, sampleRate, numBytes);
+
+        GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 1.3f, 0.02f, 0.002f);
+        WriteWaveFile("out_D_FastLow.wav", out, numChannels, sampleRate, numBytes);
+    }
+
 
     /*
     // TODO: this more adjusts playback speed on a sine wave, not pitch!!  I think you would need a TimeAdjustDynamic() to make it work
@@ -598,9 +621,6 @@ int main(int argc, char **argv)
 
 TODO:
 
-* do a zero crossings version
-* for zero crossings one, do each channel individually yeah! split the stereo into two mono's, process them, and recombine!
-
 * get cubic hermite interpolation working instead of lerp for sample interpolation, for better results
 
 * experiment with grain size and envelope size etc
@@ -620,5 +640,6 @@ https://www.granularsynthesis.com/hthesis/grain.html
  * http://www.yosoygames.com.ar/wp/2018/03/vertex-formats-part-1-compression/
 
 * zero crossings don't work in stereo unless you handle each channel separately
+* mention zero crossings as an alternate to enveloping. I didn't try it.
 
 */
