@@ -382,7 +382,6 @@ int main(int argc, char **argv)
     ReadWaveFile("legend2.wav", source, numChannels, sampleRate);
 
     // make a mono version
-    std::vector<float> sourceMono;
     sourceMono.resize(source.size() / numChannels);
     for (size_t i = 0; i < sourceMono.size(); ++i)
         sourceMono[i] = source[i*numChannels];
@@ -423,7 +422,7 @@ int main(int argc, char **argv)
     //GranularTimeAdjust(source, out, numChannels, sampleRate, 0.5f, 0.02f, 0.02f);
     //WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
 
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 2.0f, 0.02f, 0.01f);
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 1.2f, 0.02f, 0.01f);
     WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
 }
 
