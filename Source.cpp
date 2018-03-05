@@ -643,7 +643,7 @@ int main(int argc, char **argv)
             [] (float percent, float& timeMultiplier, float& pitchMultiplier)
             {
                 // time is 1
-                // pitch is 10hz from 0.72 to 1.25
+                // pitch is 10hz from 0.75 to 1.25
                 timeMultiplier = 1.0f;
                 pitchMultiplier = 1.0f / ((std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 0.5f + 0.75f);
             }
@@ -667,7 +667,7 @@ int main(int argc, char **argv)
             [] (float percent, float& timeMultiplier, float& pitchMultiplier)
             {
                 // time is 13hz from 0.5 to 2.5
-                // pitch is 10hz from 0.72 to 1.25
+                // pitch is 10hz from 0.75 to 1.25
                 timeMultiplier = (std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 2.0f + 0.5f;
                 pitchMultiplier = 1.0f / ((std::sinf(percent * c_pi * 10.0f) * 0.5f + 0.5f) * 0.5f + 0.75f);
             }
@@ -677,26 +677,3 @@ int main(int argc, char **argv)
 
     system("pause");
 }
-
-/*
-
-BLOG:
-
-* Explain algorithm, give results, link to code and also include it!
-* get links & info from email
-
-https://granularsynthesis.com/guide.php
-
-Read these:
-https://www.soundonsound.com/techniques/granular-synthesis
-https://www.granularsynthesis.com/hthesis/grain.html
-
-* note the thing about how on graphics cards there are two -1 values, to make conversion between types easier. same issues as pcm <-> float here!
- * http://www.yosoygames.com.ar/wp/2018/03/vertex-formats-part-1-compression/
-
-* zero crossings don't work in stereo unless you handle each channel separately
-* mention zero crossings as an alternate to enveloping. I didn't try it.
-
-* mention that we use lerp but could use hermite interpolation instead (link) for higher quality
-
-*/
