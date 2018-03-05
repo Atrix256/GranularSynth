@@ -2,6 +2,7 @@
 #include <memory.h>
 #include <inttypes.h>
 #include <vector>
+#include <algorithm>
  
 // typedefs
 typedef uint16_t    uint16;
@@ -33,14 +34,22 @@ struct SMinimalWaveFileHeader
     //then comes the data!
 };
 
+enum class ECrossFade
+{
+    None,
+    In,
+    Out,
+};
 
 inline void FloatToPCM(unsigned char *PCM, const float& in, size_t numBytes)
 {
+    // casting to double because floats can't exactly store 0x7fffffff, but doubles can.
+    // Details of that: https://blog.demofox.org/2017/11/21/floating-point-precision/
     uint32 data;
     if (in < 0.0f)
-        data = uint32(in * float(0x80000000));
+        data = uint32(double(in) * double(0x80000000));
     else
-        data = uint32(in * float(0x7fffffff));
+        data = uint32(double(in) * double(0x7fffffff));
 
     switch (numBytes)
     {
@@ -225,7 +234,7 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
 	}
 
 	//figure out how many samples and blocks there are total in the source data
-    int bytesPerSample = waveData.m_blockAlign / waveData.m_numChannels;
+    size_t bytesPerSample = waveData.m_blockAlign / waveData.m_numChannels;
     size_t numSourceSamples = waveData.m_subChunk2Size / bytesPerSample;
 
 	//allocate space for the source samples
@@ -235,7 +244,7 @@ bool ReadWaveFile(const char *fileName, std::vector<float>& data, uint16& numCha
     if (fileData.size() < fileIndex + numSourceSamples * bytesPerSample)
         return false;
 
-	for(int nIndex = 0; nIndex < numSourceSamples; ++nIndex)
+	for(size_t nIndex = 0; nIndex < numSourceSamples; ++nIndex)
 	{	
         PCMToFloat(data[nIndex], &fileData[fileIndex], bytesPerSample);
         fileIndex += bytesPerSample;
@@ -272,63 +281,91 @@ void TimeAdjust (const std::vector<float>& input, std::vector<float>& output, ui
     }
 }
 
-// SmoothStep
-// a function that interpolates between 0 and 1 in a way such that it's smoother than lerp, and has flat derivatives at 0 and 1.
-// https://en.wikipedia.org/wiki/Smoothstep
-float SmoothStep(float x)
+size_t SplatGrainToOutput (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, size_t grainStart, size_t grainSize, size_t outputSampleIndex, ECrossFade crossFade, size_t crossFadeSize)
 {
-    if (x <= 0.0f)
-        return 0.0f;
-    else if (x >= 1.0f)
-        return 1.0f;
-    else
-        return 3.0f * x * x - 2.0f * x * x * x;
+    // Enforce input and output array size constraints
+    size_t numInputSamples = input.size() / numChannels;
+    if (grainStart + grainSize > numInputSamples)
+        grainSize = numInputSamples - grainStart;
+
+    size_t numOutputSamples = output.size() / numChannels;
+    if (outputSampleIndex + grainSize > numOutputSamples)
+        grainSize = numOutputSamples - outputSampleIndex;
+
+    // calculate starting indices
+    size_t inputIndex = grainStart * numChannels;
+    size_t outputIndex = outputSampleIndex * numChannels;
+
+    // write the samples
+    for (size_t sample = 0; sample < grainSize; ++sample)
+    {
+        // calculate envelope for this sample
+        float envelope = 1.0f;
+        if (crossFade != ECrossFade::None)
+        {
+            if (sample <= crossFadeSize)
+                envelope = float(sample) / float(crossFadeSize);
+            if (crossFade == ECrossFade::Out)
+                envelope = 1.0f - envelope;
+        }
+
+        // write the enveloped sample
+        for (size_t channel = 0; channel < numChannels; ++channel)
+            output[outputIndex + channel] += input[inputIndex + channel] * envelope;
+
+        // move to the next samples
+        inputIndex += numChannels;
+        outputIndex += numChannels;
+    }
+
+    // return how many samples we wrote
+    return grainSize;
 }
 
-// Generates a simple trapezoid type envelope (Attack, Sustain, Decay)
-// Then applies smoothstep to make it more smooth
-float EnvelopeGenerator (float percent, float attackDecay)
+void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float timeMultiplier, float grainSizeSeconds, float crossFadeSeconds)
 {
-    if (percent < attackDecay)
-        return SmoothStep(percent / attackDecay);
-    else if ((1.0f - percent) < attackDecay)
-        return SmoothStep((1.0f - percent) / attackDecay);
-    else
-        return 1.0f;
-}
+    // calculate size of output buffer and resize it
+    size_t numInputSamples = input.size() / numChannels;
+    size_t numOutputSamples = (size_t)(float(numInputSamples) * timeMultiplier);
+    output.clear();
+    output.resize(numOutputSamples * numChannels, 0.0f);
 
-void GranularTimeAdjust (const std::vector<float>& input, std::vector<float>& output, uint16 numChannels, uint32 sampleRate, float timeMultiplier, float grainSizeSeconds, float envelopeSizePercent)
-{
-    size_t numSrcSamples = input.size() / numChannels;
-    size_t numOutSamples = (size_t)(float(numSrcSamples) * timeMultiplier);
-    output.resize(numOutSamples * numChannels, 0.0f);
-
+    // calculate how many grains are in the input data
     size_t grainSizeSamples = size_t(float(sampleRate)*grainSizeSeconds);
-
-    size_t numGrains = numSrcSamples / grainSizeSamples;
-    if (numSrcSamples % grainSizeSamples)
+    size_t numGrains = numInputSamples / grainSizeSamples;
+    if (numInputSamples % grainSizeSamples)
         numGrains++;
 
-    size_t outSampleIndex = 0;
+    // calculate the cross fade size
+    size_t crossFadeSizeSamples = size_t(float(sampleRate)*crossFadeSeconds);
+
+    // Repeat each grain 0 or more times to make the output be the correct size
+    size_t outputSampleIndex = 0;
+    size_t lastGrainWritten = -1;
     for (size_t grain = 0; grain < numGrains; ++grain)
     {
-        size_t grainStart = grain * grainSizeSamples;
-        size_t grainEnd = (grain + 1)*grainSizeSamples;
+        // calculate the boundaries of the grain
+        size_t inputGrainStart = grain * grainSizeSamples;
 
-        size_t outGrainEnd = size_t(float(grainEnd) * timeMultiplier);
+        // calculate the end of where this grain should go in the output buffer
+        size_t outputSampleWindowEnd = size_t(float(inputGrainStart + grainSizeSamples) * timeMultiplier);
 
-        while (outSampleIndex < outGrainEnd && outSampleIndex < numOutSamples)
+        // Splat out zero or more copies of the grain to get our output to be at least as far as we want it to be.
+        // Zero copies happens when we shorten time and need to cut pieces (grains) out of the original sound
+        while (outputSampleIndex < outputSampleWindowEnd)
         {
-            for (size_t sample = 0; sample < grainSizeSamples && outSampleIndex + sample < numOutSamples; ++sample)
+            // if we are writing our first grain, or the last grain we wrote was the previous grain, then we don't need to do a cross fade`
+            if ((lastGrainWritten == -1) || (lastGrainWritten == grain - 1))
             {
-                float envelope = EnvelopeGenerator(float(sample) / float(grainSizeSamples - 1), envelopeSizePercent);
-                for (size_t channel = 0; channel < numChannels; ++channel)
-                {
-                    output[(outSampleIndex + sample)*numChannels + channel] = input[(grainStart + sample)*numChannels + channel] * envelope;
-                }
+                outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::None, crossFadeSizeSamples);
+                lastGrainWritten = grain;
+                continue;
             }
 
-            outSampleIndex += grainSizeSamples;
+            // else we need to fade out the old grain and then fade in the new one
+            SplatGrainToOutput(input, output, numChannels, lastGrainWritten * grainSizeSamples, grainSizeSamples, outputSampleIndex, ECrossFade::Out, crossFadeSizeSamples);
+            outputSampleIndex += SplatGrainToOutput(input, output, numChannels, inputGrainStart, grainSizeSamples, outputSampleIndex, ECrossFade::In, crossFadeSizeSamples);
+            lastGrainWritten = grain;
         }
     }
 }
@@ -339,8 +376,9 @@ int main(int argc, char **argv)
     uint16 numChannels;
     uint32 sampleRate;
     std::vector<float> source, out;
-    ReadWaveFile("legend1.wav", source, numChannels, sampleRate);
+    ReadWaveFile("legend2.wav", source, numChannels, sampleRate);
 
+    // TODO: enable before final checkin
 #if 1
     // speed up the audio and increase pitch
     TimeAdjust(source, out, numChannels, 0.7f);
@@ -349,15 +387,21 @@ int main(int argc, char **argv)
     // slow down the audio and decrease pitch
     TimeAdjust(source, out, numChannels, 1.3f);
     WriteWaveFile("out_A_SlowLow.wav", out, numChannels, sampleRate);
-#endif
 
     // speed up audio without affecting pitch
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 0.02f, 0.1f );
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 0.7f, 0.02f, 0.002f);
     WriteWaveFile("out_B_Fast.wav", out, numChannels, sampleRate);
 
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 0.4f, 0.02f, 0.002f);
+    WriteWaveFile("out_B_Faster.wav", out, numChannels, sampleRate);
+
     // slow down audio without affecting pitch
-    GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.01f, 0.2f );
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 1.3f, 0.02f, 0.002f);
     WriteWaveFile("out_B_Slow.wav", out, numChannels, sampleRate);
+
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 2.1f, 0.02f, 0.002f);
+    WriteWaveFile("out_B_Slower.wav", out, numChannels, sampleRate);
+#endif
 
     // TODO: when making it shorter, do we skip granules?
 
@@ -367,21 +411,25 @@ int main(int argc, char **argv)
     
     // TODO: I think there may be some math issues with GranularTimeAdjust() and index calculations. I got a crash when switching to divide or passing reciprocal
 
-    WriteWaveFile("out.wav", source, numChannels, sampleRate);
+    //WriteWaveFile("out.wav", source, numChannels, sampleRate);
+
+
+    // TODO: this has lots of clicking, but seems like it shouldn't.
+    //GranularTimeAdjust(source, out, numChannels, sampleRate, 0.5f, 0.02f, 0.02f);
+    //WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
+
+    GranularTimeAdjust(source, out, numChannels, sampleRate, 2.0f, 0.02f, 0.002f);
+    WriteWaveFile("out_C.wav", out, numChannels, sampleRate);
 }
 
 /*
 
 TODO:
 
-* this stuff needs cleaning up big time :P
+* it sounds like there is a lot of popping in the output, i wonder why
+ * maybe do the zero crossings version and come back to this?
 
-* fread the entire file in at once?
-
-* test 1, 2, 3, 4, byte formats. test their round trips too!
-
-* actually, maybe start with source code for "lament of tim curry"
- * https://blog.demofox.org/2012/06/18/diy-synth-3-sampling-mixing-and-band-limited-wave-forms/
+* test 1, 2, 3, 4, byte formats for saving and loading. test their round trips too!
 
  * build w32 and x64
 
@@ -391,9 +439,7 @@ TODO:
 
 * compare using zero crossings, cubic interpolation, and envelopes
 
-* experiment with grain size
-
-* make parames be apples to apples. Like... 0.7 for time adjust is 1.3 for playback speed adjust?? make it take the same values
+* experiment with grain size and envelope size etc
 
 BLOG:
 
